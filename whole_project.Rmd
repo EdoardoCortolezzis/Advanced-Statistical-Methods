@@ -1,0 +1,2916 @@
+---
+title: "ASM Project"
+author: "Edoardo Cortolezzis"
+date: "`r Sys.Date()`"
+output:
+  prettydoc::html_pretty:
+    theme: hpstr
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+#Markdown setup:
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, cache = TRUE)
+```
+```{r, cache = TRUE, include=FALSE}
+# Loading all libraries needed:
+packages <- c("ggwordcloud", "combinat", "leaflet", "corrplot", "Metrics", "mlmRev", "loo", "cowplot", "dplyr", "readtext", "tidytext", "stringr", "tm", "tokenizers", "quanteda", "stm",
+              "ldatuning", "wordcloud", "MASS", "Hmisc", "ggplot2", "mgcv", "reshape2",
+              "rstanarm", "lme4", "ggplot2", "gridExtra", "bayesplot", "broom.mixed", "tidyr")
+
+# Function to install and load packages
+install_and_load <- function(packages) {
+  for (pkg in packages) {
+    if (!require(pkg, character.only = TRUE)) {
+      install.packages(pkg, dependencies = TRUE)
+    }
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Run the function
+install_and_load(packages)
+```
+
+
+# Exercise 1: Multilevel modeling
+**Consider the dataset nyc_arrests.txt related to the police stops (you find the dataset in the Exam section in the Moodle page): for further details, see G& H book, Chapter 15, and lecture notes about hierarchical models, slides 123–128.** 
+
+
+```{r, cache=TRUE}
+#Posso fare così grafici MCMC:
+# #plots
+# library(bayesplot)
+# library(ggplot2)
+# 
+# # Step 1: Extract posterior draws for the 'treatment' effect from each Bayesian model
+# posterior_draws_treatment <- lapply(bayesian_models_8, function(model) {
+#   as.matrix(model)[, "treatment"]
+# })
+# 
+# # Step 2: Combine posterior draws into a single matrix with row labels for the grades
+# draws_matrix <- do.call(cbind, posterior_draws_treatment)
+# colnames(draws_matrix) <- paste("Grade", 1:4)
+# 
+# # Step 3: Extract frequentist estimates for the treatment effect from each frequentist model
+# frequentist_estimates <- sapply(frequentist_models_8, function(model) {
+#   coef(model)["treatment"]
+# })
+# 
+# # Create a data frame for frequentist estimates
+# estimates_df <- data.frame(
+#   Estimate = frequentist_estimates,
+#   Grade = factor(paste("Grade", 1:4), levels = paste("Grade", 1:4))
+# )
+# 
+# # Step 4: Plot the intervals with the frequentist estimates overlaid as vertical dotted lines and green dots
+# mcmc_intervals(draws_matrix, prob = 0.95, prob_outer = 0.99) + 
+#   ggtitle("Treatment Effect Across Grades") + 
+#   theme_minimal() +
+#   theme(plot.title = element_text(hjust = 0.5, face = "bold")) +
+#   labs(x = "Treatment Effect", y = "Grade") +
+#   
+#   # Step 5: Add green dots for frequentist estimates
+#   geom_point(data = estimates_df, aes(x = Estimate, y = Grade), color = "purple", size = 2, shape = 21, fill = "pink") +
+#   
+#   # Add a black vertical line at x = 0
+#   geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+#   
+#   # Adjust y-axis to properly display grades
+#   scale_y_discrete(labels = paste("Grade", 1:4))
+
+
+
+
+
+
+#https://www.datadreaming.org/posts/2018-04-11-r-markdown-theme-gallery/2018-04-11-r-markdown-theme-gallery
+# ---
+# title: "ASM Project"
+# author: "Edoardo Cortolezzis"
+# date: "`r Sys.Date()`"
+# output:
+#   rmarkdown::html_document:
+#     toc: yes
+#     toc_float: true
+#     number_sections: true
+#     theme: spacelab
+# ---
+
+# ---
+# title: "ASM Project"
+# author: "Edoardo Cortolezzis"
+# date: "`r Sys.Date()`"
+# output:
+#   prettydoc::html_pretty:
+#     theme: hpstr
+#     toc: yes
+# ---
+```
+
+
+
+## Fit the model (24) in the notes from a Bayesian and a frequentist point of view, using rstanarm/rstan and lme4 packages.
+First, let's load the data and take a look at it.
+```{r, cache = TRUE}
+data <- read.table("datasets/nyc_arrests.txt", header = TRUE, sep = " ", skip = 6) # the first 5 written lines are comments about the dataset
+
+# adding a small value to the zero values of past.arrests to avoid numerical errors
+data$past.arrests <- data$past.arrests + 0.0001
+# Correct the zero values for numerical errors <---- da capire. Se metto 0 nella log likelihod mi da errore <- questa parte la posso riscrivere più avanti
+
+summary(data)
+```
+1. **stops**: Number of police stops recorded;
+
+2. **pop**: Population size in the precinct;
+
+3. **past.arrests**: Measure of past arrests;
+
+4. **precinct**: Precinct number, ranging from 1 to 75;
+
+5. **eth**: Ethnicity type: 1 for 'Black', 2 for 'Hispanic' and 3 for 'White';
+
+6. **crime**: Crime type: 1 for 'Violent crimes', 2 for 'Weapons crimes', 3 for 'Property crimes' and 4 for 'Drug crimes'.
+
+Variables distributions:
+```{r, cache = TRUE, echo = FALSE}
+# Function to plot the distribution of a single variable
+plot_distribution <- function(data, var) {
+  if (is.numeric(data[[var]])) {
+    p <- ggplot(data, aes_string(x = var)) +
+      geom_histogram(binwidth = (max(data[[var]], na.rm = TRUE) - min(data[[var]], na.rm = TRUE)) / 30, fill = 'purple', color = 'black') +
+      labs(title = paste("Distribution of", var), x = var, y = "Frequency") +
+      theme_minimal()
+  } else if (is.factor(data[[var]]) || is.character(data[[var]])) {
+    p <- ggplot(data, aes_string(x = var)) +
+      geom_bar(fill = 'blue', color = 'black') +
+      labs(title = paste("Distribution of", var), x = var, y = "Count") +
+      theme_minimal()
+  } else {
+    p <- NULL
+  }
+  return(p)
+}
+
+# Create a list to hold all the plots
+plots <- list()
+
+# Loop through all variables in the dataframe and create plots
+for (var in names(data)) {
+  p <- plot_distribution(data, var)
+  if (!is.null(p)) {
+    plots[[var]] <- p
+  }
+}
+
+# Display all the plots in a grid
+n <- length(plots)
+nCol <- floor(sqrt(n))  # Number of columns
+nRow <- ceiling(n / nCol)  # Number of rows
+do.call(grid.arrange, c(plots, ncol = nCol, nrow = nRow))
+```
+
+For each of the 4 crime, we can check the Stops distributions:
+
+- grouped by precinct:
+```{r, cache = TRUE, echo = FALSE}
+# Define custom labels for the crime types
+crime_labels <- c("1" = "Violent", "2" = "Weapons", "3" = "Property", "4" = "Drugs")
+
+# Create a custom function to label only the first and last precincts
+label_precinct <- function(x) {
+  ifelse(x == 1, "1", ifelse(x == 75, "75", ""))
+}
+
+# Plot the response (stops) grouped by precinct for the 4 different crimes
+library(ggplot2)
+ggplot(data, aes(x = factor(precinct), y = stops, fill = factor(crime, labels = c("Violent", "Weapons", "Property", "Drugs")))) +
+  geom_boxplot() +
+  facet_wrap(~ crime, labeller = as_labeller(crime_labels)) +
+  labs(#title = "Distribution of Stops by Precinct for Different Crimes",
+       x = "Precinct",
+       y = "Number of Stops",
+       fill = "Crime Type") +
+  scale_x_discrete(labels = label_precinct) +  # Apply custom x-axis labels
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+- grouped by ethnicity:
+```{r, cache = TRUE, echo = FALSE}
+# Define custom labels for the crime types
+crime_labels <- c("1" = "Violent", "2" = "Weapons", "3" = "Property", "4" = "Drugs")
+
+# Define custom labels for ethnicities
+eth_labels <- c("1" = "black", "2" = "hispanic", "3" = "white")
+
+# Plot the response (stops) grouped by ethnicity for the 4 different crimes without the legend
+library(ggplot2)
+ggplot(data, aes(x = factor(eth, labels = c("black", "hispanic", "white")), y = stops, fill = factor(crime, labels = c("Violent", "Weapons", "Property", "Drugs")))) +
+  geom_boxplot() +
+  facet_wrap(~ crime, labeller = as_labeller(crime_labels)) +
+  labs(#title = "Distribution of Stops by Ethnicity for Different Crimes",
+       x = "Ethnicity",
+       y = "Number of Stops",
+       fill = "Crime Type") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+From this plots we may infer that the number of stops is higher in some precint, depending on the crime type, and that there may some higher stop rates for 'Black' and 'Hispanic', compared to 'White'.
+
+We'll take this info into account by fitting model (24). A Poisson multilevel model that estimates the number of stops, while taking into account the variations among precincts and ethnic groups.
+
+Model (24):
+$$y_{ep} \sim \text{Poisson} \left( \frac{15}{12} u_{ep} e^{\mu + \alpha_e + \beta_p + \epsilon_{ep}} \right)$$
+$$\alpha_e \sim N(0, \sigma^2_{\alpha}) \\
+\beta_p \sim N(0, \sigma^2_{\beta}) \\
+\epsilon_{ep} \sim N(0, \sigma^2_{\epsilon})$$
+
+where:
+
+- $y_{ep}$ corresponds to stops: the number of stops in the precinct for the ethnicity relative to the crime; 
+- $u_{ep}$ corresponds to past.arrests: the number of past arrests in the precinct p for the ethnicity e; 
+- $\alpha_e$ and $\beta_p$ correspond to the ethnic and precinct random effects, respectively; 
+- $\epsilon_{ep}$ corresponds to the error term to account for overdispersion.
+
+Models Fitting:
+```{r, cache = TRUE, results='hide'}
+# Define the models lists to store the models
+fr_models <- list()
+ba_models <- list()
+
+# Fit the models for each crime
+for (i in 1:4){ 
+cat("\nFitting the Frequentist model for crime ", i, "\n")
+# Fit the frequentist model using glmer
+fr_models[[i]] <- glmer(stops ~ 1 + (1|eth) + (1|precinct) + (1|eth:precinct),
+                    offset = log((15/12) * past.arrests),
+                    data = data,
+                    subset = (crime == i),
+                    family = poisson())
+
+cat("\nFitting the Bayesian model for crime ", i, "\n")
+# Fit the bayesian model using stan_glmer
+ba_models[[i]] <- stan_glmer(stops ~ 1 + (1|eth) + (1|precinct) + (1|eth:precinct),
+                    offset = log((15/12) * past.arrests),
+                    data = data,
+                    subset = (crime == i),
+                    prior = normal(),
+                    family = poisson(),
+                    seed = 42)
+}
+```
+
+Model fitting di Tanja che non mostro :)
+```{r, cache = TRUE, include=FALSE}
+# Define the mapping from numeric codes to crime types
+crime_type_map <- setNames(c("Violent", "Weapons", "Property", "Drug"), 1:4)
+
+bayesian_models <- list()
+frequentist_models <- list()
+
+# Fit models for each crime type
+for (crime_code in 1:4) {
+  # Filter the data for the current crime type
+  subset_data <- data %>%
+    filter(crime == crime_code)
+  
+  # Skip if there's no data for the current crime type
+  if(nrow(subset_data) == 0) {
+    next
+  }
+  
+  # Fit the frequentist model
+  model_freq <- glmer(stops ~ 1 + (1 | eth) + (1 | precinct) + (1 | eth:precinct), 
+                      offset = log((15/12) * (past.arrests + 1e-5)),  
+                      data = subset_data,
+                      family = poisson())
+  
+  # Store the model
+  crime_type <- crime_type_map[as.character(crime_code)]
+  frequentist_models[[crime_type]] <- model_freq
+  
+  # Fit the Bayesian model
+  model_bayes <- stan_glmer(stops ~ 1 + (1 | eth) + (1 | precinct) + (1 | eth:precinct), 
+                            offset = log((15/12) * (past.arrests + 1e-5)),  
+                            data = subset_data,
+                            family = poisson(),
+                            seed = 123)
+  
+  bayesian_models[[crime_type]] <- model_bayes
+}
+
+```
+
+
+## Provide the estimates (also from a graphical perspective) and comment the results. Hint: use the bayesplot package when you can.
+After fitting the models, we can extract the estimates and visualize them using the `bayesplot` package.
+
+Estimates:
+```{r, cache = TRUE, echo = FALSE}
+for (i in 1:4){
+cat("Frequentist model for crime: ", i, "\n")
+print(fr_models[[i]])
+cat("\nBayesian model for crime: ", i, "\n")
+print(ba_models[[i]])
+cat("\n\n﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌\n")
+}
+```
+
+Parte di Tanja da nascondere:
+```{r, cache = TRUE, echo = FALSE, include=FALSE}
+#Extracting Bayesian estimates
+
+# Function to extract estimates from model summaries
+extract_estimates <- function(model_summary, model_type, crime_type) {
+  if (is.null(model_summary)) {
+    return(NULL)
+  }
+  
+  # Extract the data from the summary object
+  estimates_df <- as.data.frame(model_summary)
+  estimates_df$Parameter <- rownames(estimates_df)
+  
+  # Select only relevant columns and rename them
+  estimates_df <- estimates_df[, c("Parameter", "mean", "sd")]
+  estimates_df$Model_Type <- model_type  # Add a column to label the model type (Bayesian or Frequentist)
+  estimates_df$Crime_Type <- crime_type  # Add crime type to the dataframe
+  return(estimates_df)
+}
+
+# Extract summaries from Bayesian models
+bayesian_estimates <- lapply(names(bayesian_models), function(name) {
+  model_summary <- tryCatch(summary(bayesian_models[[name]]), error = function(e) NULL)
+  if (!is.null(model_summary)) {
+    extract_estimates(model_summary, "Bayesian", name)
+  } else {
+    NULL
+  }
+})
+
+# Remove NULL entries from the list and combine into one data frame
+bayesian_estimates <- do.call(rbind, Filter(Negate(is.null), bayesian_estimates))
+print(bayesian_estimates)
+
+
+#Extracting Frequentist estimates
+
+extract_freq_estimates <- function(model, crime_type) {
+  # Directly obtain the summary of the fixed effects
+  fixed_effects <- summary(model)$coefficients
+
+  # Calculate the degrees of freedom for residuals
+  df_resid = nobs(model) - length(fixef(model))
+
+  # Create a data frame from the fixed effects
+  estimates_df <- data.frame(
+    Parameter = rownames(fixed_effects),
+    mean = fixed_effects[, "Estimate"],
+    sd = fixed_effects[, "Std. Error"] * sqrt(df_resid),
+    Model_Type = "Frequentist",
+    Crime_Type = crime_type,
+    stringsAsFactors = FALSE
+  )
+
+  return(estimates_df)
+}
+
+# Apply the function to each model in the frequentist_models list
+frequentist_estimates <- Map(extract_freq_estimates, frequentist_models, names(frequentist_models))
+
+# Combine all estimates into one data frame for comparison
+combined_frequentist_estimates <- do.call(rbind, frequentist_estimates)
+print(head(combined_frequentist_estimates))
+```
+
+Plots:
+
+- Eth:
+
+```{r, cache = TRUE, echo = FALSE}
+# list of variables to plot
+vars <- c("b[(Intercept) eth:1]", "b[(Intercept) eth:2]", "b[(Intercept) eth:3]")
+
+# Create an empty list to store the plots
+plot_list <- list()
+
+# Define the mapping from numeric codes to crime types
+crime_type_map <- setNames(c("Violent", "Weapons", "Property", "Drug"), 1:4)
+
+# Create a loop to plot each Bayesian model and overlay the frequentist estimates
+for (crime_code in 1:4) {
+  # Get the crime type name
+  crime_type <- crime_type_map[as.character(crime_code)]
+  
+  # Extract the Bayesian model for the current crime type
+  model_bayes <- bayesian_models[[crime_type]]
+  
+  # Extract the frequentist model for the current crime type
+  model_freq <- frequentist_models[[crime_type]]
+  
+  # Skip if there is no data for this crime type
+  if (is.null(model_bayes) | is.null(model_freq)) {
+    next
+  }
+  
+  # Get the posterior intervals for the Bayesian model
+  bayes_plot <- mcmc_intervals(as.matrix(model_bayes),
+                               pars = vars) +
+    ggtitle(crime_type) +  # Use the actual crime name
+    theme_minimal()
+  
+  # Extract the random effect estimates from the frequentist model for ethnicity (eth)
+  freq_ranef <- ranef(model_freq)$eth[, "(Intercept)"]
+  
+  # Create a dataframe with the frequentist random effect estimates for plotting
+  freq_df <- data.frame(
+    eth_group = vars,
+    estimate = freq_ranef
+  )
+  
+  # Overlay the frequentist estimates as red points
+  final_plot <- bayes_plot +
+    geom_point(data = freq_df, aes(x = estimate, y = eth_group), color = "pink", size = 3)
+  
+  # Add the plot to the list
+  plot_list[[crime_code]] <- final_plot
+}
+
+# Arrange the plots in a grid layout
+do.call(grid.arrange, c(plot_list, nrow = 2, ncol = 2))
+```
+
+- Precint: 1 to 5 and 71 to 75
+
+```{r, cache = TRUE, echo=FALSE, fig.width=12, fig.height=8}
+# Assume these are loaded as needed
+
+# Create an empty list to store the plots
+plot_list <- list()
+
+# Define the mapping from numeric codes to crime types
+crime_type_map <- setNames(c("Violent", "Weapons", "Property", "Drug"), 1:4)
+
+# Create a loop to plot each Bayesian model and overlay the frequentist estimates
+for (crime_code in 1:4) {
+  crime_type <- crime_type_map[as.character(crime_code)]
+  model_bayes <- bayesian_models[[crime_type]]
+  model_freq <- frequentist_models[[crime_type]]
+
+  if (is.null(model_bayes) | is.null(model_freq)) next
+
+  precinct_pars <- paste0("b[(Intercept) precinct:", c(1:5, 71:75), "]")
+  bayes_plot <- mcmc_intervals(as.matrix(model_bayes), pars = precinct_pars) +
+    ggtitle(crime_type) +
+    theme_minimal() +
+    theme(axis.text.y = element_text(size = 10))
+  
+  freq_ranef_precinct <- ranef(model_freq)$precinct[c(1:5, 71:75), "(Intercept)"]
+  freq_df <- data.frame(precinct_group = precinct_pars, estimate = freq_ranef_precinct)
+
+  final_plot <- bayes_plot +
+    geom_point(data = freq_df, aes(x = estimate, y = precinct_group), color = "pink", size = 3)
+  
+  plot_list[[crime_code]] <- final_plot
+}
+
+grid.arrange(grobs = plot_list, nrow = 2, ncol = 2)
+
+
+```
+
+- Eth:Precint
+
+```{r, cache = TRUE, echo=FALSE, fig.width=12, fig.height=8}
+# Assume these are loaded as needed
+
+# Create an empty list to store the plots
+plot_list <- list()
+
+# Define the mapping from numeric codes to crime types
+crime_type_map <- setNames(c("Violent", "Weapons", "Property", "Drug"), 1:4)
+
+# Create a loop to plot each Bayesian model and overlay the frequentist estimates
+for (crime_code in 1:4) {
+  crime_type <- crime_type_map[as.character(crime_code)]
+  model_bayes <- bayesian_models[[crime_type]]
+  model_freq <- frequentist_models[[crime_type]]
+
+  if (is.null(model_bayes) | is.null(model_freq)) next
+
+  precinct_pars <- paste0("b[(Intercept) eth:precinct:1:", c(1:10), "]")
+  bayes_plot <- mcmc_intervals(as.matrix(model_bayes), pars = precinct_pars) +
+    ggtitle(crime_type) +
+    theme_minimal() +
+    theme(axis.text.y = element_text(size = 10))
+  
+  freq_ranef_precinct <- ranef(model_freq)$`eth:precinct`[c(1:10), "(Intercept)"]
+  freq_df <- data.frame(precinct_group = precinct_pars, estimate = freq_ranef_precinct)
+
+  final_plot <- bayes_plot +
+    geom_point(data = freq_df, aes(x = estimate, y = precinct_group), color = "pink", size = 3)
+  
+  plot_list[[crime_code]] <- final_plot
+}
+
+grid.arrange(grobs = plot_list, nrow = 2, ncol = 2)
+
+
+```
+
+
+
+## Fit directly a negative binomial model using rstanarm/rstan and compare it with the previous estimates. 
+An alternative to the $\epsilon_{ep}$ term, to account for overdispersion, would be fitting a negative binomial model. Now, similarly to what we did previously, we'll fit a negative binomial model using rstanarm and compare it with the previous estimates:
+
+
+```{r, cache = TRUE, results='hide'}
+nb_models <- list()
+for (i in 1:4){
+cat("Fitting the Negative Binomial model for crime ", i,"\n")
+nb_models[[i]] <- stan_glmer(stops ~ 1 + (1|eth) + (1|precinct) + (1 | eth:precinct),
+                             offset = log((15/12) * past.arrests),
+                             data = data,
+                             subset = (crime == i),
+                             prior = normal(),
+                             family = neg_binomial_2(),
+                             seed = 42)
+}
+```
+
+
+Now we can take a look at the estimates of these models and compare them with the previous ones:
+
+```{r, cache = TRUE, echo = FALSE}
+for (i in 1:4){
+cat("\nNegative Binonial model for crime ", i, "\n")
+print(nb_models[[i]])
+cat("\nBayesian model for crime ", i, "\n")
+print(bayesian_models[[i]])
+cat("\n\n﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌﹌\n")
+}
+```
+
+We can also take a visual look at the estimates of both the poisson and the negative binomial models:
+
+- Density Plots:
+  - Poisson:
+```{r, cache = TRUE, echo=FALSE}
+# Mapping of crime type IDs to names
+crime_type_map <- setNames(c("Violent", "Weapons", "Property", "Drug"), 1:4)
+
+# Initialize list for density plots
+plots_density_po <- list()
+
+# Loop through the 4 crime types
+for (i in 1:4) {
+  # Subset data for the current crime type
+  y <- data$stops[data$crime == i]
+  
+  # Get posterior predictive samples for the current model
+  yrep1 <- posterior_predict(ba_models[[i]])
+  
+  # Create density plot with a dynamic title
+  p1a <- ppc_dens_overlay(y, yrep1) +
+    ggtitle(paste("Crime Type:", crime_type_map[as.character(i)]))
+  
+  # Store the plot
+  plots_density_po[[i]] <- p1a
+}
+
+# Arrange density plots in a 2x2 grid
+grid_density_po <- plot_grid(plotlist = plots_density_po, nrow = 2, ncol = 2)
+
+# Display the grid
+grid_density_po
+```
+  
+  - Negative Binomial:
+```{r, cache = TRUE, echo=FALSE}
+# Initialize list for density plots
+plots_density_nb <- list()
+
+# Loop through the 4 crime types
+for (i in 1:4) {
+  # Subset data for the current crime type
+  y <- data$stops[data$crime == i]
+  
+  # Get posterior predictive samples for the current model
+  yrep1 <- posterior_predict(nb_models[[i]])
+  
+  # Create density plot with a dynamic title
+  p1a <- ppc_dens_overlay(y, yrep1) +
+    ggtitle(paste("Crime Type:", crime_type_map[as.character(i)]))
+  
+  # Store the plot
+  plots_density_nb[[i]] <- p1a
+}
+
+# Arrange density plots in a 2x2 grid
+grid_density_nb <- plot_grid(plotlist = plots_density_nb, nrow = 2, ncol = 2)
+
+# Display the grid
+grid_density_nb
+```
+
+
+
+- 2D Stats Plots:
+  - Poisson:
+```{r, cache = TRUE, echo=FALSE}
+# Initialize list for density plots
+plots_2d_po <- list()
+
+# Loop through the 4 crime types
+for (i in 1:4) {
+  # Subset data for the current crime type
+  y <- data$stops[data$crime == i]
+  
+  # Get posterior predictive samples for the current model
+  yrep1 <- posterior_predict(ba_models[[i]])
+  
+  # Create density plot with a dynamic title
+  p1b <- ppc_stat_2d(y, yrep1) +
+    ggtitle(paste("Crime Type:", crime_type_map[as.character(i)]))
+  
+  # Store the plot
+  plots_2d_po[[i]] <- p1b
+}
+
+# Arrange density plots in a 2x2 grid
+grid_2d_po <- plot_grid(plotlist = plots_2d_po, nrow = 2, ncol = 2)
+
+# Display the grid
+grid_2d_po
+```
+  
+  - Negative Binomial:
+```{r, cache = TRUE, echo=FALSE}
+# Initialize list for density plots
+plots_2d_nb <- list()
+
+# Loop through the 4 crime types
+for (i in 1:4) {
+  # Subset data for the current crime type
+  y <- data$stops[data$crime == i]
+  
+  # Get posterior predictive samples for the current model
+  yrep1 <- posterior_predict(nb_models[[i]])
+  
+  # Create density plot with a dynamic title
+  p1b <- ppc_stat_2d(y, yrep1) +
+    ggtitle(paste("Crime Type:", crime_type_map[as.character(i)]))
+  
+  # Store the plot
+  plots_2d_nb[[i]] <- p1b
+}
+
+# Arrange density plots in a 2x2 grid
+grid_2d_nb <- plot_grid(plotlist = plots_2d_nb, nrow = 2, ncol = 2)
+
+# Display the grid
+grid_2d_nb
+```
+
+
+
+comment to be done. Explain why poisson is better than negative binomial.
+
+## Compare models in terms of predictive information criteria. 
+
+To compare the models, we can use an extension of AIC based on cross validation, LOOIC, available via the loo package.
+
+```{r, cache = TRUE, echo=FALSE}
+# Extract the LOOIC values for the Bayesian and Negative Binomial models
+loo_nb = c()
+loo_bayesian = c()
+for (i in 1:4){
+  loo_nb = c(loo_nb, loo(nb_models[[i]])$looic)
+  loo_bayesian = c(loo_bayesian, loo(bayesian_models[[i]])$looic)
+}
+```
+LOOIC values:
+```{r, cache = TRUE, echo=FALSE}
+for (i in 1:4){
+  cat("Crime ", i, "\n - LOOIC for Negative Binomial model: ",
+      loo_nb[i], "\n - LOOIC for Poisson model: ",
+      loo_bayesian[i], "\n")
+}
+```
+
+Plot od LOOIC values:
+```{r, cache = TRUE, echo=FALSE}
+# plot of loo_nb and loo_bayesian for the different crimes:
+loo_df <- data.frame(Crime = 1:4, LOOIC_NB = loo_nb, LOOIC_Bayesian = loo_bayesian)
+# plot
+ggplot(loo_df, aes(x = Crime)) +
+  geom_line(aes(y = LOOIC_NB, color = "Negative Binomial"), size = 1) +
+  geom_point(aes(y = LOOIC_NB, color = "Negative Binomial"), size = 3) +
+  geom_line(aes(y = LOOIC_Bayesian, color = "Poisson"), size = 1) +
+  geom_point(aes(y = LOOIC_Bayesian, color = "Poisson"), size = 3) +
+  labs(title = "LOOIC values for the Poisson and Negative Binomial models",
+       x = "Crime Type",
+       y = "LOOIC") +
+  scale_color_manual(values = c("Negative Binomial" = "red", "Poisson" = "blue")) +
+  theme_minimal()
+
+```
+
+Since, for LOOIC the lower the better, we can see that the Bayesian models have a lower LOOIC than the Negative Binomial models, suggesting that the Bayesian models are better at predicting the data.
+
+However, da ampliare, vedi come ha fatto alessio
+
+## Divide the dataset in training/test and make some predictions. 
+
+I will divide the dataset in training and test set, and make some predictions using the models we've fitted. I will split the data in 80% training and 20% test.
+```{r, cache = TRUE}
+# Set the seed for reproducibility
+set.seed(42)
+train_indices <- sample(seq_len(nrow(data)), size = 0.8 * nrow(data))
+# Create training and testing sets
+train_data <- data[train_indices, ]
+test_data <- data[-train_indices, ]
+```
+
+Now, we can train the 2 models (Poisson-bayesian and negative binomial) on the training set and make predictions on the test set.
+```{r, cache = TRUE, results='hide'}
+# Fit the models on the training set
+bayesian_models_train <- list()
+nb_models_train <- list()
+for (i in 1:4){
+  cat("\nFitting the Bayesian model for crime ", i, " on the training set\n")
+  bayesian_models_train[[i]] <- stan_glmer(stops ~ 1 + (1|eth) + (1|precinct) + (1|eth:precinct),
+                                          offset = log((15/12) * past.arrests),
+                                          data = train_data,
+                                          subset = (crime == i),
+                                          prior = normal(),
+                                          family = poisson(),
+                                          seed = 42)
+  cat("\nFitting the Negative Binomial model for crime ", i, " on the training set\n")
+  nb_models_train[[i]] <- stan_glmer(stops ~ 1 + (1|eth) + (1|precinct) + (1|eth:precinct),
+                                    offset = log((15/12) * past.arrests),
+                                    data = train_data,
+                                    subset = (crime == i),
+                                    prior = normal(),
+                                    family = neg_binomial_2(),
+                                    seed = 42)
+}
+```
+
+```{r, cache = TRUE, echo = FALSE, results='hide'}
+# Predictions on test data:
+set.seed(123)
+
+# Initialize lists to store predictions
+bayesian_predictions <- list()
+nb_predictions <- list()
+
+# Loop through each crime type and make predictions
+for (i in 1:4) {
+  # Bayesian model predictions
+  bayesian_predictions[[i]] <- posterior_predict(bayesian_models_train[[i]], newdata = test_data[test_data$crime == i, ], draw = 1)
+  
+  # Negative Binomial model predictions
+  nb_predictions[[i]] <- posterior_predict(nb_models_train[[i]], newdata = test_data[test_data$crime == i, ], draw = 1)
+}
+
+# Combine predictions into a single data frame
+prediction_table <- data.frame(
+  actual_stops = test_data$stops,
+  bayesian_pred = unlist(bayesian_predictions),
+  nb_pred = unlist(nb_predictions)
+)
+
+# Display the prediction table
+print(prediction_table)
+
+```
+
+Evaluating the predictions of the models with seed 123:
+```{r, cache = TRUE, echo = FALSE}
+# Evaluating the 2 models on test_data over MAE and RMSE:
+# Calculate MAE and RMSE for Bayesian model
+mae_bayesian <- mae(prediction_table$actual_stops, prediction_table$bayesian_pred)
+rmse_bayesian <- rmse(prediction_table$actual_stops, prediction_table$bayesian_pred)
+
+# Calculate MAE and RMSE for Negative Binomial model
+mae_nb <- mae(prediction_table$actual_stops, prediction_table$nb_pred)
+rmse_nb <- rmse(prediction_table$actual_stops, prediction_table$nb_pred)
+
+# Print the results
+cat("Overall Results: \nPoisson Model - MAE:", mae_bayesian, "\n")
+cat("\nPoisson Model - RMSE:", rmse_bayesian, "\n")
+cat("\nNegative Binomial Model - MAE:", mae_nb, "\n")
+cat("\nNegative Binomial Model - RMSE:", rmse_nb, "\n")
+```
+
+From these metrics, we may be tempted to say that the Poisson model is better than the Negative Binomial model. However, the results depend a lot on the seed chosen. 
+
+Hence, we'll now see the average MAE and RMSE for both models as we change the seed in the predictions:
+```{r, cache = TRUE, echo = FALSE}
+# Initialize a data frame to store the results
+results <- data.frame(seed = integer(), mae_bayesian = numeric(), rmse_bayesian = numeric(), mae_nb = numeric(), rmse_nb = numeric())
+
+# Loop through seed values from 1 to 200
+for (seed in 1:20) {
+  set.seed(seed)
+  
+  # Initialize lists to store predictions
+  bayesian_predictions <- list()
+  nb_predictions <- list()
+  
+  # Loop through each crime type and make predictions
+  for (i in 1:4) {
+    # Bayesian model predictions
+    bayesian_predictions[[i]] <- posterior_predict(bayesian_models_train[[i]], newdata = test_data[test_data$crime == i, ], draw = 1)
+    
+    # Negative Binomial model predictions
+    nb_predictions[[i]] <- posterior_predict(nb_models_train[[i]], newdata = test_data[test_data$crime == i, ], draw = 1)
+  }
+  
+  # Combine predictions into a single data frame
+  prediction_table <- data.frame(
+    actual_stops = test_data$stops,
+    bayesian_pred = unlist(bayesian_predictions),
+    nb_pred = unlist(nb_predictions)
+  )
+  
+  # Calculate MAE and RMSE for Bayesian model
+  mae_bayesian <- mae(prediction_table$actual_stops, prediction_table$bayesian_pred)
+  rmse_bayesian <- rmse(prediction_table$actual_stops, prediction_table$bayesian_pred)
+  
+  # Calculate MAE and RMSE for Negative Binomial model
+  mae_nb <- mae(prediction_table$actual_stops, prediction_table$nb_pred)
+  rmse_nb <- rmse(prediction_table$actual_stops, prediction_table$nb_pred)
+  
+  # Store the results in the data frame
+  results <- rbind(results, data.frame(seed = seed, mae_bayesian = mae_bayesian, rmse_bayesian = rmse_bayesian, mae_nb = mae_nb, rmse_nb = rmse_nb))
+}
+
+# Mean values of MAE and RMSE for both models over the first 20 seeds:
+cat("Mean values of these metrics for the Poisson model over the first 20 seeds: \n - MAE: ", mean(results$mae_bayesian), "\n - RMSE: ", mean(results$rmse_bayesian))
+cat("Mean values of these metrics for the Negative Binomial model over the first 20 seeds: \n - MAE: ", mean(results$mae_nb), "\n - RMSE: ", mean(results$rmse_nb))
+```
+
+From these results, we see how the 2 models have very similar performances on average.
+
+Plotting the predictions:
+```{r, echo = FALSE}
+# Bayesian model:
+bayesian_plot <- ggplot(prediction_table, aes(x = actual_stops, y = bayesian_pred)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red") +
+  labs(title = "Poisson Model: Actual vs Predicted Stops",
+       x = "Actual Stops",
+       y = "Predicted Stops") +
+  theme_minimal()
+
+
+# Negative Binomial model:
+nb_plot <- ggplot(prediction_table, aes(x = actual_stops, y = nb_pred)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red") +
+  labs(title = "Negative Binomial Model: Actual vs Predicted Stops",
+       x = "Actual Stops",
+       y = "Predicted Stops") +
+  theme_minimal()
+
+# grid with both plots:
+plot_grid(bayesian_plot, nb_plot, nrow = 2)
+```
+
+From the plots of the predictions and the and the metric's values on both models, we can see how the 2 models behave similarly. Furthermore, it is evident that both models still fall short in making sufficiently accurate predictions.
+
+
+## Extend the model: write a modeling extension (fit is not required) where a further continuous covariate income_ethnicity, expressing an average income for the ethnicity e in New-York City, is available. (Hint: there is not a unique way to incorporate it). Finally, discuss the eventual sign of the estimated coefficient from a “socio-political” perspective. 
+An alternative model, that incorporates the continuous covariate income_eth ($\gamma_e$), could be:
+
+- Poisson model: $$y_{ep} \sim \text{Poisson} \left( \frac{15}{12} u_{ep} e^{\mu + \alpha_e + \beta_p + \epsilon_{ep} + \gamma_e} \right) \\
+    \alpha_e \sim \mathcal{N}(0, \sigma^2_{\alpha}) \\
+    \beta_p \sim \mathcal{N}(0, \sigma^2_{\beta}) \\
+    \epsilon_{ep} \sim \mathcal{N}(0, \sigma^2_{\epsilon}) \\
+    \gamma_e \sim \mathcal{N}(0, \sigma^2_{\gamma}) \\$$
+
+- Negative Binomial Model: $$y_{ep} \sim \text{NB} \left( \frac{15}{12} u_{ep} e^{\mu + \alpha_e + \beta_p + \gamma_e}, \omega_{ep} \right) \\
+    \alpha_e \sim \mathcal{N}(0, \sigma^2_{\alpha}) \\
+    \beta_p \sim \mathcal{N}(0, \sigma^2_{\beta}) \\
+    \gamma_e \sim \mathcal{N}(0, \sigma^2_{\gamma}) \\
+    \omega_{ep} ~ is ~ the ~ overdispersione ~ parameter ~ of ~ the ~ NB ~ model.$$
+
+From a socio-political standpoint, we might anticipate that the estimated number of stops would increase as average income decreases. This expectation stems from the general correlation between higher income levels and lower crime rates. Consequently, as the income of an ethnic group rises, the number of stops is likely to decline.
+
+
+# Excercise 2: Causal inference
+
+Da rivedere e mettere apposto
+
+**Consider the dataset electric_wide.txt about the Electric Company example (you find the dataset in the
+Exam section in the Moodle page): for further details see the ROS book, Chapter 19.2, and lecture notes
+from slide 19.**
+
+
+```{r, cache=TRUE}
+# loading the dataset and preprocessing to be compatible with the CI models
+data_electric <- read.table("datasets/electric_wide.txt", header = TRUE)
+# preprocessing from the lab
+post_test <- c(data_electric$treated_posttest, data_electric$control_posttest)
+pre_test <- c(data_electric$treated_pretest, data_electric$control_pretest)
+grade <- rep(data_electric$grade, 2)
+treatment <- rep(c(1,0), rep(length(data_electric$treated_posttest),2))
+supp <- rep(NA, length(data_electric$treatment))
+n_pairs <- nrow(data_electric)
+pair_id <- rep(1:n_pairs, 2)
+supp[treatment==1] <- ifelse(data_electric$supplement=="Supplement", 1, 0)
+n <- length(post_test)
+electric <- data.frame(post_test, pre_test, grade, treatment, supp, pair_id)
+
+str(electric)
+```
+
+The dataset consists of 192 observations across 6 variables: da cambiare
+
+- ppost_test: score after the experiment;
+- pre_test: score before the experiment;
+- grade level (grade): grade of the students on which the score was measured;
+- treatment: wether the treatment was assigned or not;
+- supp: status of the supplement;
+- pair_id: pair identifier.
+
+```{r, cache=TRUE, echo=FALSE}
+# Fit linear models for each grade and treatment group
+model_params <- electric %>%
+  group_by(grade, treatment) %>%
+  summarise(intercept = coef(lm(post_test ~ pre_test))[1],
+            slope = coef(lm(post_test ~ pre_test))[2])
+
+# Create the plot with annotations
+ggplot(electric, aes(x = pre_test, y = post_test, color = factor(treatment))) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_wrap(~grade) +
+  labs(title = "Pre and Post Test Scores for Treated and Control Groups",
+       x = "Pre Test Score",
+       y = "Post Test Score",
+       color = "Treatment Group") +
+  theme_minimal() +
+  geom_text(data = model_params %>% filter(treatment == 1), 
+            aes(label = paste("Intercept (Treated):", round(intercept, 2), "\nSlope (Treated):", round(slope, 2))),
+            x = Inf, y = Inf, hjust = 1.1, vjust = 1.1, size = 3, color = "black") +
+  geom_text(data = model_params %>% filter(treatment == 0), 
+            aes(label = paste("\n\nIntercept (Control):", round(intercept, 2), "\nSlope (Control):", round(slope, 2))),
+            x = Inf, y = Inf, hjust = 1.1, vjust = 2.2, size = 3, color = "black")
+
+```
+
+From these plots we can see that the lower the grade, the steeper the improvement (difference between pre and post-test scores). However, it's not clear how impactful the treatment is on the improvement. For this reason, we'll fit the following models.
+
+## Fit the models (6), (7) and (8) from lecture notes from a Bayesian and a frequentist point of view, using rstanarm/rstan and lme4 packages.
+Models fitting:
+### Model (6)
+$$y_i = \alpha + \theta*z_i + error_i$$
+where:
+
+- $y_i$ is the post-test score of the i-th student;
+- $\alpha$ is the intercept (when no treatment is applied);
+- $\theta$ is the treatment effect. Which is counted only for people in the treatment group (with $z_i = 1$), and is 0 for people in the control group (with $z_i = 0$).
+
+```{r, cache=TRUE, results='hide'}
+# Define the models lists to store the models
+frequentist_models_6 <- list()
+bayesian_models_6 <- list()
+
+# Fit the models for each crime
+for (i in 1:4){ 
+  cat("Fitting models for grade", i, "\n")
+  cat("Frequentist model\n")
+  frequentist_models_6[[i]] <- lm(post_test ~ treatment,
+                                data = electric[electric$grade == i,])
+  
+  cat("Bayesian model\n")
+  bayesian_models_6[[i]] <- stan_glm(post_test ~ treatment,
+                                   data = electric[electric$grade == i,],
+                                   family = gaussian(),
+                                   seed=42)
+}
+```
+
+### Model (7)
+
+$$y_i = \alpha + \theta*z_i + \beta*x_i + error_i$$
+where:
+
+- ...
+- $\beta$ is the slope associated to the pre-test variable ($x_i$).
+
+```{r, cache=TRUE, results='hide'}
+# Define the models lists to store the models
+frequentist_models_7 <- list()
+bayesian_models_7 <- list()
+
+# Fit the models for each crime
+for (i in 1:4){ 
+  cat("Fitting models for grade", i, "\n")
+  cat("Frequentist model\n")
+  frequentist_models_7[[i]] <- lm(post_test ~ treatment + pre_test,
+                                data = electric[electric$grade == i,])
+  
+  cat("Bayesian model\n")
+  bayesian_models_7[[i]] <- stan_glm(post_test ~ treatment + pre_test,
+                                   data = electric[electric$grade == i,],
+                                   family = gaussian(),
+                                   seed=42)
+}
+```
+
+### Model (8)
+
+$$y_i = \alpha + \theta*z_i + \beta*x_i + \tau*z_i*x_i + error_i$$
+where:
+
+- ...
+- $\tau$ is the slope associated to the pre-test variable ($x_i$) when the i-th observation has been assigned to the treatment group ($z_i = 1$).
+
+```{r, cache=TRUE, results='hide'}
+# Define the models lists to store the models
+frequentist_models_8 <- list()
+bayesian_models_8 <- list()
+
+# Fit the models for each crime
+for (i in 1:4){ 
+  cat("Fitting models for grade", i, "\n")
+  cat("Frequentist model\n")
+  frequentist_models_8[[i]] <- lm(post_test ~ treatment * pre_test,
+                                data = electric[electric$grade == i,])
+  
+  cat("Bayesian model\n")
+  bayesian_models_8[[i]] <- stan_glm(post_test ~ treatment * pre_test,
+                                   data = electric[electric$grade == i,],
+                                   family = gaussian(),
+                                   seed=42)
+}
+```
+
+
+## Provide the estimates (also from a graphical perspective) and comment the results. <- da trarre delle conclusioni
+
+### Model (6)
+Estimates:
+```{r, cache=TRUE, echo=FALSE}
+# estimates
+for (i in 1:4){
+  cat("\n----------------\nGrade", i, "\n")
+  cat("-- Frequentist\n")
+  print(summary(frequentist_models_6[[i]]))
+  cat("-- Bayesian\n")
+  print(summary(bayesian_models_6[[i]]))
+}
+```
+
+Plots:
+```{r, cache=TRUE, echo=FALSE}
+
+# Step 1: Extract posterior draws for the 'treatment' effect from each Bayesian model
+posterior_draws_treatment <- lapply(bayesian_models_6, function(model) {
+  as.matrix(model)[, "treatment"]
+})
+
+# Step 2: Combine posterior draws into a single matrix with row labels for the grades
+draws_matrix <- do.call(cbind, posterior_draws_treatment)
+colnames(draws_matrix) <- paste("Grade", 1:4)
+
+# Step 3: Extract frequentist estimates for the treatment effect from each frequentist model
+frequentist_estimates <- sapply(frequentist_models_6, function(model) {
+  coef(model)["treatment"]
+})
+
+# Create a data frame for frequentist estimates
+estimates_df <- data.frame(
+  Estimate = frequentist_estimates,
+  Grade = factor(paste("Grade", 1:4), levels = paste("Grade", 1:4))
+)
+
+
+# defining plot_mcmc function in r:
+plot_mcmc <- function(p1, p2){
+  stringa <- paste0("Treatment Effect Across Grades, when p1 = ", p1, "and p2 = ", p2)
+  print(stringa)
+  the_plot <- mcmc_intervals(draws_matrix, prob = p1, prob_outer = p2) + 
+  ggtitle(stringa) + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold")) +
+  labs(x = "Treatment Effect", y = "Grade") +
+  
+  # Step 5: Add green dots for frequentist estimates
+  geom_point(data = estimates_df, aes(x = Estimate, y = Grade), color = "purple", size = 2, shape = 21, fill = "pink") +
+  
+  # Add a black vertical line at x = 0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  
+  # Adjust y-axis to properly display grades
+  scale_y_discrete(labels = paste("Grade", 1:4))
+  
+  return(the_plot)
+}
+
+plot_85_90 = plot_mcmc(p1 = 0.85, p2 = 0.90)
+plot_90_95 = plot_mcmc(p1 = 0.90, p2 = 0.95)
+plot_95_99 = plot_mcmc(p1 = 0.95, p2 = 0.99)
+
+# grid for the 2 plot:
+plot_grid(plot_85_90, plot_90_95, plot_95_99, nrow = 3)
+```
+As we grow the confident intervals, we can see that the treatment effect seems to be significant for the lower grades, but not for the higher ones. This is consistent with the idea that the treatment has a more significant impact on students with lower grades.
+In particular, it seems that the treatment has a significant positive effect on the post-test scores of students in second grade.
+
+### Model (7)
+Estimates:
+```{r, cache=TRUE, echo=FALSE}
+# estimates
+for (i in 1:4){
+  cat("\n----------------\nGrade", i, "\n")
+  cat("-- Frequentist\n")
+  print(summary(frequentist_models_7[[i]]))
+  cat("-- Bayesian\n")
+  print(summary(bayesian_models_7[[i]]))
+}
+```
+
+Plots:
+```{r, cache=TRUE}
+# Step 1: Extract posterior draws for the 'treatment' effect from each Bayesian model
+posterior_draws_treatment <- lapply(bayesian_models_7, function(model) {
+  as.matrix(model)[, "treatment"]
+})
+
+# Step 2: Combine posterior draws into a single matrix with row labels for the grades
+draws_matrix <- do.call(cbind, posterior_draws_treatment)
+colnames(draws_matrix) <- paste("Grade", 1:4)
+
+# Step 3: Extract frequentist estimates for the treatment effect from each frequentist model
+frequentist_estimates <- sapply(frequentist_models_7, function(model) {
+  coef(model)["treatment"]
+})
+
+# Create a data frame for frequentist estimates
+estimates_df <- data.frame(
+  Estimate = frequentist_estimates,
+  Grade = factor(paste("Grade", 1:4), levels = paste("Grade", 1:4))
+)
+
+plot_85_90 = plot_mcmc(p1 = 0.85, p2 = 0.90)
+plot_90_95 = plot_mcmc(p1 = 0.90, p2 = 0.95)
+plot_95_99 = plot_mcmc(p1 = 0.95, p2 = 0.99)
+
+# grid for the 2 plot:
+plot_grid(plot_85_90, plot_90_95, plot_95_99, nrow = 3)
+```
+With model (7), we can see with more confidence the significant impact of the treatment on the post-test scores of students in the first 2 grades. 
+
+### Model (8)
+Estimate:
+```{r, cache=TRUE, echo=FALSE}
+# estimates
+for (i in 1:4){
+  cat("\n----------------\nGrade", i, "\n")
+  cat("-- Frequentist\n")
+  print(summary(frequentist_models_8[[i]]))
+  cat("-- Bayesian\n")
+  print(summary(bayesian_models_8[[i]]))
+}
+```
+Plots:
+```{r, cache=TRUE}
+#plots
+library(bayesplot)
+library(ggplot2)
+
+# Step 1: Extract posterior draws for the 'treatment' effect from each Bayesian model
+posterior_draws_treatment <- lapply(bayesian_models_8, function(model) {
+  as.matrix(model)[, "treatment"]
+})
+
+# Step 2: Combine posterior draws into a single matrix with row labels for the grades
+draws_matrix <- do.call(cbind, posterior_draws_treatment)
+colnames(draws_matrix) <- paste("Grade", 1:4)
+
+# Step 3: Extract frequentist estimates for the treatment effect from each frequentist model
+frequentist_estimates <- sapply(frequentist_models_8, function(model) {
+  coef(model)["treatment"]
+})
+
+# Create a data frame for frequentist estimates
+estimates_df <- data.frame(
+  Estimate = frequentist_estimates,
+  Grade = factor(paste("Grade", 1:4), levels = paste("Grade", 1:4))
+)
+
+plot_85_90 = plot_mcmc(p1 = 0.85, p2 = 0.90)
+plot_90_95 = plot_mcmc(p1 = 0.90, p2 = 0.95)
+plot_95_99 = plot_mcmc(p1 = 0.95, p2 = 0.99)
+
+# grid for the 2 plot:
+plot_grid(plot_85_90, plot_90_95, plot_95_99, nrow = 3)
+```
+The results of the models show that the treatment effect is not significant for any of the grades. This suggests that, when considering the impact of the treatment combined with the pre-test scores, the treatment did not have a significant impact on the post-test scores of the students.
+
+da riscrivere meglio leggendo bene la teoria
+
+## Write in formulas and fit a multilevel/hierarchical model on these data and compare the results with those previously obtained. <- da rivedereeeeee
+
+
+Starting from the model (7) (because 8 was too complex to run), we group observations by grade and fit a multilevel model with a random intercept and slop for each grade and pre_test. 
+$$
+y_{ij} = \alpha_j + \theta_j z_{ij} + \beta_j x_{ij} + \text{error}_{ij}
+$$
+
+where:
+- $i$ indexes individual level observations and $j$ indexes the groups (grades in this case);
+- $\alpha_j$ is the group-specific intercept for grade $j$;
+- $\theta_j$ is the effect of treatment for grade $j$;
+- $z_{ij}$ = 1 if the observation $i$ in grade $j$ is in the treatment group, 0 otherwise;
+- $\beta_j$ is the effect of the pre-test score ($x_{ij}$) for grade $j$;
+- $\text{error}_{ij}$ is the residual error term for observation $i$ in grade $j$.
+
+Now, we can fit the model from both the frequentist and Bayesian perspectives: 
+```{r, cache=TRUE, results='hide'}
+# Fit the multilevel model using lmer
+frequentist_model_7_multilevel <- lmer(
+  post_test ~ treatment * pre_test + (1 + treatment + pre_test| grade),
+  data = electric
+)
+# Fit the multilevel model using stan_glm
+bayesian_model_7_multilevel <- stan_glmer(
+  post_test ~ treatment * pre_test + (1+ treatment + pre_test| grade),
+  data = electric,
+  family = gaussian(),
+  seed = 42
+)
+```
+
+Let's compare the results with the previous models: <- perchè questo funziona qui, ma non nel primo ese???
+```{r, cache=TRUE, results='hide'}
+# Extract posterior samples from the model
+posterior_samples <- as.matrix(bayesian_model_7_multilevel)
+
+colnames(posterior_samples)
+```
+
+```{r, cache=TRUE, results='hide'}
+# Plot MCMC intervals for the intercepts and treatment effects
+bayesplot::mcmc_intervals(
+  posterior_samples,
+  pars = c("(Intercept)", "treatment", "pre_test", "treatment:pre_test", "b[(Intercept) grade:1]", "b[treatment grade:1]", "b[pre_test grade:1]", "b[(Intercept) grade:2]", "b[treatment grade:2]", "b[pre_test grade:2]", "b[(Intercept) grade:3]", "b[treatment grade:3]", "b[pre_test grade:3]", "b[(Intercept) grade:4]", "b[treatment grade:4]", "b[pre_test grade:4]" )# da finire di mettere il resto delle intercette  
+)
+```
+interpretazioneeeeee: solo intercept, treatment e "b[(Intercept) grade:1]" sembrano significativi.
+
+# Excercise 3: Semiparametric regression
+**Consider the data in https://www.kaggle.com/datasets/sameersmahajan/seattle-house-sales-prices.
+Price is your response variable y.**
+```{r, cache=TRUE, results='hide'}
+d=read.csv("datasets/house_sales.csv",header=TRUE)
+# Load the dplyr package
+library(dplyr)
+d$date <- substr(d$date, 1, 8) %>% as.Date("%Y%m%d")
+```
+Before fitting the model, let's take a look at the dataset:
+```{r, cache=TRUE, echo=TRUE}
+# plot the distributions of all the variables (except the second) in a grid of plots.
+
+#copy all the data, but the second column:
+d_copy <- d[,-2]
+
+# Reshape data to long format
+d_long <- melt(d_copy)
+
+# Plot using ggplot2 with facets
+ggplot(d_long, aes(x = value)) +
+  geom_density(fill = "lightblue", color = "black") +
+  facet_wrap(~variable, scales = "free", ncol = 3) +
+  labs(title = "Density Plots for Variables", x = "Value", y = "Density") +
+  theme_minimal()
+
+```
+
+where:
+
+- **id**: Numeric identifier for each house sale.
+- **date**: Date of the sale in YYYY-MM-DD format.
+- **price**: Sale price of the house (in USD).
+- **bedrooms**: Number of bedrooms in the house.
+- **bathrooms**: Number of bathrooms in the house, including fractional values.
+- **sqft_living**: Square footage of the living space.
+- **sqft_lot**: Square footage of the lot.
+- **floors**: Number of floors in the house.
+- **waterfront**: Binary indicator of whether the house is waterfront (0 = No, 1 = Yes).
+- **view**: Binary indicator of whether the house has a view (0 = No, 1 = Yes).
+- **condition**: Condition of the house on a scale from 1 to 5.
+- **grade**: Grade of the house on a scale from 1 to 13.
+- **sqft_above**: Square footage of the house excluding the basement.
+- **sqft_basement**: Square footage of the basement.
+- **yr_built**: Year the house was built.
+- **yr_renovated**: Year the house was renovated (0 if not renovated).
+- **zipcode**: Zip code where the house is located.
+- **lat**: Latitude of the house's location.
+- **long**: Longitude of the house's location.
+- **sqft_living15**: Square footage of the living space in 2015.
+- **sqft_lot15**: Square footage of the lot in 2015.
+
+
+As we can see from the above plots, both price and sqft_living are highly skewed. Therefore, it might be beneficial to consider the log of these variables in the model.
+
+
+## Fit a semiparametric regression model
+Model formula:
+$$
+y_i = f(x_i) + \epsilon_i, \quad \epsilon_i \sim i.i.d. \, ~N(0, \sigma^2)
+$$
+Where:
+
+ - **$y_i$** is the house price for observation $i$.
+ - **$x_i$** is sqft_living variable, so the square footage of the living area.
+ - **$f(x_i)$** is a smooth function estimated from the data.
+ - **$\epsilon_i$** are the error terms, assumed to be normally distributed with mean 0 and variance $\sigma^2$.
+
+
+
+
+Before fitting the model, let's take a look at the data distributions of the predictor and the response and their correlation:
+```{r, cache=TRUE, echo=FALSE}
+library(ggplot2)
+ggplot(d, aes(x = sqft_living, y = price)) +
+  geom_point() +
+  labs(title = "Price vs. Sqft Living",
+       x = "Sqft Living",
+       y = "Price")
+
+# Compute and print the correlation between price and sqft_living:
+print(paste("The correlation between the variables is", cor(d$price, d$sqft_living)))
+```
+As we can see, the 2 variables are higly correlated. Therefore, the spline model might be a good fit for the data.
+
+```{r, cache=TRUE}
+model <- gam(price ~ s(sqft_living), data = d)
+summary(model)
+```
+```{r, cache=TRUE, echo=FALSE}
+# plotting the fitted model over the data
+ggplot(d, aes(x=sqft_living, y=price)) +
+  geom_point() +
+  geom_smooth(method = "gam", formula = y ~ s(x), se = TRUE) +
+  theme_minimal()
+```
+
+
+## Discuss the model fit, explain why the model is not adequate and propose how to improve it. <- da mettere apposto controllando la teoria (un modello buono c'è (zipcode))
+
+### Model Fit discussion:
+We can see that the sqft_living variable is significant in predicting the price of the house. Furthermore, the model explains 55% of the variance in the response variable. (R^2)
+
+Then, by looking at the residuals plots, we can notice that:
+```{r, echo=FALSE}
+par(mfrow=c(2,2))
+gam.check(model)
+```
+
+- in the QQ Plot, the residuals are not normally distributed;
+- in the Resids vs Fitted plot, the residuals present a pattern that wasn't captured by the model;
+- in the Response vs Fitted plot, the residuals are not homoscedastic. In fact, the residuals are more spread out for higher values of the fitted values.
+
+
+### Further consideration on the datset and EDA:
+These results could be further improved by considering other covariates in the model or transforming the response variable and/or the predictors. Hence, from now on, we'll proceed by using log transformed versions of the below variables:
+```{r, cache=TRUE, echo=FALSE}
+# log transforming the skeweed variables: 
+d$log_price <- log(d$price)
+d$log_sqft_living <- log(d$sqft_living)
+d$log_sqft_lot <- log(d$sqft_lot)
+d$log_view <- log(d$view+0.00000000000001) # correcting 0 values before log transformation
+d$log_sqft_above <- log(d$sqft_above)
+d$log_sqft_basement <- log(d$sqft_basement+0.00000000000001)# correcting 0 values before log transformation
+d$log_sqft_living15 <- log(d$sqft_living15)
+d$log_sqft_lot15 <- log(d$sqft_lot15)
+
+
+
+# plotting the variables before and after the transformation:
+d[c("price", "log_price", "sqft_living", "log_sqft_living", "sqft_lot", "log_sqft_lot", 
+    "view", "log_view", "sqft_above", "log_sqft_above", "sqft_basement", "log_sqft_basement", 
+    "sqft_living15", "log_sqft_living15", "sqft_lot15", "log_sqft_lot15")] %>%
+  gather(key = "variable", value = "value") %>%
+  mutate(type = ifelse(grepl("^log_", variable), "Log Transformed", "Original")) %>%
+  ggplot(aes(x = value, fill = type, color = type)) +
+  geom_density(alpha = 0.6) +
+  scale_fill_manual(values = c("Original" = "red", "Log Transformed" = "green")) +
+  scale_color_manual(values = c("Original" = "red", "Log Transformed" = "green")) +
+  facet_wrap(~variable, scales = "free", ncol = 3) +
+  labs(title = "Density Plots for Variables", x = "Value", y = "Density") +
+  theme_minimal()
+
+```
+
+Now that we have transformed these variables, we can drop the non transformed versions:
+```{r, cache=TRUE}
+# Drop the non-transformed variables:
+d <- d[, !grepl("^sqft_living$|^price$|^sqft_lot$|^view$|^sqft_above$|^sqft_basement$|^sqft_living15$|^sqft_lot15$", names(d))]
+colnames(d)
+```
+
+
+Then, another relevant information could be how many years have passed since the last time the house was renovated (if renovated at all). 
+Since the kaggle dataset was updated the last time 6 years ago, we'll assume that this data refers to the year 2019. Therefore, we can create a new variable that indicates whether the house was renovated in the last 10, 20, 30, ... years. 
+```{r, echo=FALSE}
+# Assign renovation categories without overlapping
+d$renovation_category <- with(d, 
+  ifelse(yr_renovated == 0, "Not renovated",
+  ifelse(yr_renovated > 2009, "Last 10 years",
+  ifelse(yr_renovated > 1999, "Between 11 and 20 years ago",
+  ifelse(yr_renovated > 1989, "Between 21 and 30 years ago",
+  ifelse(yr_renovated > 1979, "Between 31 and 40 years ago",
+  ifelse(yr_renovated > 1969, "Between 41 and 50 years ago", "More than 50 years ago")))))))
+
+# Convert to a factor for better handling in plots or analysis
+d$renovation_category <- factor(d$renovation_category, 
+                                 levels = c("Not renovated", "Last 10 years", 
+                                            "Between 11 and 20 years ago", "Between 21 and 30 years ago", 
+                                            "Between 31 and 40 years ago", "Between 41 and 50 years ago", 
+                                            "More than 50 years ago"))
+
+# Preview the new variable
+table(d$renovation_category)
+```
+
+
+
+Before further guessing what good fitting model could be, let's first take a look at the heatmap of the variables to check for any multicollinearity between them:
+
+```{r, cache=TRUE, echo=FALSE}
+# compute the correlation matrix
+correlation_matrix <- cor(d[,c("log_price", "log_sqft_living", "bedrooms", "bathrooms", "floors", "waterfront", "log_view", "condition", "grade", "log_sqft_above", "log_sqft_basement", "yr_built", "yr_renovated", "lat", "long", "log_sqft_living15", "log_sqft_lot15", "log_sqft_lot")])
+
+
+
+
+# heatmap of the correlation matrix
+corrplot(correlation_matrix, method = "color")
+```
+
+
+Other than the obvious correlation between log_price and price, we can see that log_price is mainly correlated with:
+```{r, echo=FALSE}
+# 10 most correlated variables with price
+# Extract the correlations with 'price'
+price_correlation <- correlation_matrix[,"log_price"]
+
+# Remove the correlation of price with itself (which is always 1)
+price_correlation <- price_correlation[-1]
+
+# Sort by absolute value and select the top 10
+top_10_correlated <- sort(abs(price_correlation), decreasing = TRUE)[3:12]
+
+# Display the result as an ordered point list
+for (i in seq_along(top_10_correlated)) {
+  cat(sprintf("%d. %s: %.3f\n", i, names(top_10_correlated)[i], top_10_correlated[i]))
+}
+
+```
+
+Then, another important factor to consider is the location of the house.
+```{r, cache=TRUE, echo=FALSE, results='hide'}
+# Create the leaflet map with your data
+leaflet(data = d) %>%
+  addTiles() %>%  # Uses OpenStreetMap tiles by default
+  setView(lng = -122.3321, lat = 47.6062, zoom = 12) %>%  # Center on Seattle
+  addCircleMarkers(~long, ~lat, color = ~colorNumeric("viridis", price)(price),
+                   radius = 1, label = ~paste("Price: $", price), fillOpacity = 0.7) %>%
+  addLegend(pal = colorNumeric("viridis", d$price), values = d$price,
+            title = "Price", position = "bottomright")
+
+```
+```{r, cache=TRUE, echo=FALSE}
+# Create the leaflet map with your data
+leaflet(data = d) %>%
+  addTiles() %>%  # Uses OpenStreetMap tiles by default
+  setView(lng = -122.3321, lat = 47.6062, zoom = 10) %>%  # Center on Seattle
+  addCircleMarkers(~long, ~lat, color = ~colorNumeric("viridis", log_price)(log_price),
+                   radius = 1, label = ~paste("Price: $", log_price), fillOpacity = 0.7) %>%
+  addLegend(pal = colorNumeric("viridis", d$log_price), values = d$log_price,
+            title = "LOG_Price", position = "bottomright")
+```
+
+From the maps above, we can see that there are some locations where the prices are significantly higher. In fact, the position, is a crucial point in the housing market and we may want to consider it in the model. To do this, let's consider another 2 more variables that could be useful in the model: the distance from the city center (not sure if it can be used, due to possible multicollinearity) and the location of the house (combination of zipcode, lat and long).
+
+```{r, cache=TRUE}
+# city center coordinates: lng = -122.3321, lat = 47.6062
+# distance from the city center
+d$distance_from_center <- sqrt((d$long + 122.3321)^2 + (d$lat - 47.6062)^2)
+
+# correlation between the new variables and the price
+print(paste("The correlation between log_price and the distance from the city center is", cor(d$log_price, d$distance_from_center)))
+```
+
+da controllare sta cosa del city center....
+
+To avoid multicollinearity, we could avoid using sqft_living15, sqft_above and sqft_basement since they are highly correlated with log_sqft_living.
+
+
+
+
+
+
+
+
+
+Then we must consider the multicollinearity between the variables in the model:
+```{r, echo=FALSE}
+# List of all variables except the target (log_price)
+variables <- c("log_sqft_living", "bedrooms", "bathrooms", "floors", "waterfront", "log_view", "condition", "grade", "log_sqft_above", "log_sqft_basement", "yr_built", "yr_renovated", "lat", "long", "log_sqft_living15", "log_sqft_lot15", "log_sqft_lot", "distance_from_center")
+
+# Checking for any high level of correlation between the variables:
+correlation_matrix <- cor(d[, variables], use = "complete.obs") # Handle missing values
+library(corrplot)
+corrplot(correlation_matrix, method = "color")
+
+# Find variable pairs with absolute correlation higher than 0.7 in the upper triangle (excluding diagonal):
+correlated_pairs <- which(upper.tri(correlation_matrix) & abs(correlation_matrix) > 0.7, arr.ind = TRUE)
+
+# Print and store the correlated variable pairs:
+cat("Highly correlated variable pairs:\n")
+for (k in 1:nrow(correlated_pairs)) {
+  var1 <- variables[correlated_pairs[k, 1]]
+  var2 <- variables[correlated_pairs[k, 2]]
+  corr_value <- correlation_matrix[correlated_pairs[k, 1], correlated_pairs[k, 2]]
+  cat(sprintf("- %s is correlated with %s with a value of: %.3f\n", var1, var2, corr_value))
+}
+
+# store the correlated pairs in a list:
+correlated_pairs_list <- list()
+for (k in 1:nrow(correlated_pairs)) {
+  var1 <- variables[correlated_pairs[k, 1]]
+  var2 <- variables[correlated_pairs[k, 2]]
+  correlated_pairs_list[[k]] <- c(var1, var2)
+}
+```
+Those variables won't be put together in the models to avoid multicollinearity.
+
+```{r, cache=TRUE}
+# elements that are in colnames(d), but not in variables:
+setdiff(colnames(d), variables)
+```
+
+
+### Fitting better models: <- il migliore è quello con log_sqft_living, zipcode e waterfront
+Let's see how the 'full_model' works against test data.
+
+```{r, cache=TRUE}
+#better not to include zipcode to lower the edfs:
+quasi_full_model <- gam(log_price ~ s(log_sqft_living) + te(lat, long), data = train_data)
+```
+
+```{r, cache=TRUE}
+# good alternative:
+full_model <- gam(log_price ~ s(log_sqft_living) + s(distance_from_center) + factor(zipcode), data = train_data)
+```
+
+
+
+
+BEST ONE SOOOOOO FAR:
+```{r, cache=TRUE}
+# altro modello più semplice con ottimi risultati:
+full_model <- gam(log_price ~ s(log_sqft_living) + factor(zipcode) + factor(waterfront), data = train_data)
+
+
+# oooook:
+par(mfrow=c(2,2))
+gam.check(full_model)
+
+
+# plot the estimates Vs. actual values and the residuals:
+train_data$predicted_log_price <- predict(full_model, newdata = train_data)
+
+ggplot(train_data, aes(x = log_price, y = predicted_log_price)) +
+  geom_point(alpha = 0.4) +  # Scatter plot of actual vs predicted values
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +  # Reference line
+  labs(
+    title = "Predicted vs Actual Log Price",
+    x = "Actual Log Price",
+    y = "Predicted Log Price"
+  ) +
+  theme_minimal()
+
+
+
+train_data$residuals <- train_data$log_price - train_data$predicted_log_price
+
+ggplot(train_data, aes(x = predicted_log_price, y = residuals)) +
+  geom_point(alpha = 0.4) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Residual Plot",
+    x = "Predicted Log Price",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+
+
+
+
+
+# test data:
+test_data$predicted_log_price <- predict(full_model, newdata = test_data)
+
+ggplot(test_data, aes(x = log_price, y = predicted_log_price)) +
+  geom_point(alpha = 0.4) +  # Scatter plot of actual vs predicted values
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +  # Reference line
+  labs(
+    title = "Predicted vs Actual Log Price (Test Data)",
+    x = "Actual Log Price",
+    y = "Predicted Log Price"
+  ) +
+  theme_minimal()
+
+
+
+test_data$residuals <- test_data$log_price - test_data$predicted_log_price
+
+ggplot(test_data, aes(x = predicted_log_price, y = residuals)) +
+  geom_point(alpha = 0.4) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Residual Plot (Test Data)",
+    x = "Predicted Log Price",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+test_data$zipcode <- factor(test_data$zipcode, levels = levels(train_data$zipcode))
+
+
+# visualizing the residuals in the seattle map:
+library(leaflet)
+leaflet(data = test_data) %>%
+  addTiles() %>%  # Uses OpenStreetMap tiles by default
+  setView(lng = -122.3321, lat = 47.6062, zoom = 10) %>%  # Center on Seattle
+  addCircleMarkers(~long, ~lat, color = ~colorNumeric("viridis", residuals)(residuals),
+                   radius = 1, label = ~paste("Residual: ", round(residuals, 2)), fillOpacity = 0.7) %>%
+  addLegend(pal = colorNumeric("viridis", test_data$residuals), values = test_data$residuals,
+            title = "Residuals", position = "bottomright")
+```
+
+
+
+
+
+
+
+
+
+
+```{r, cache=TRUE}
+# dividing the data into training and test sets:
+set.seed(42)
+train_indices <- sample(1:nrow(d), 0.8 * nrow(d))
+train_data <- d[train_indices,]
+test_data <- d[-train_indices,]
+
+# Fit the model on the training data
+full_model <- gam(log_price ~ s(log_sqft_living) + factor(zipcode), data = train_data)
+
+# Generate predictions for the test data
+test_data$predicted <- predict(full_model, newdata = test_data)
+
+# Compute the RMSE on the test data: 0.208019042810201
+rmse <- sqrt(mean((test_data$log_price - test_data$predicted)^2))
+print(paste("The RMSE on the test data is", rmse))
+
+# Compute the MAE of the model: 0.152515325632121
+mae <- mean(abs(test_data$log_price - test_data$predicted))
+print(paste("The MAE on the test data is", mae))
+```
+
+Comparison with the simple model:
+```{r, cache=TRUE}
+# Fit the simple model on the training data
+simple_model <- gam(log_price ~ s(log_sqft_living), data = train_data)
+
+# Generate predictions for the test data
+test_data$predicted_simple <- predict(simple_model, newdata = test_data)
+
+# Compute the RMSE on the test data: 0.381706650275008
+rmse_simple <- sqrt(mean((test_data$log_price - test_data$predicted_simple)^2))
+print(paste("The RMSE of the simple model is", rmse_simple))
+
+# Compute the MAE of the simple model: 0.310527798198223
+mae_simple <- mean(abs(test_data$log_price - test_data$predicted_simple))
+print(paste("The MAE of the simple model is", mae_simple))
+```
+
+Let's try another model:
+```{r, cache=TRUE}
+# Fit the better model on the training data
+better_model <- gam(log_price ~ s(log_sqft_living) + factor(waterfront) + grade , data = train_data)
+
+# Generate predictions for the test data: 0.351513005690435
+test_data$predicted_better <- predict(better_model, newdata = test_data)
+
+# Compute the RMSE on the test data: 0.351513005690435
+rmse_better <- sqrt(mean((test_data$log_price - test_data$predicted_better)^2))
+print(paste("The RMSE of the better model is", rmse_better))
+
+# Compute the MAE of the better model: 0.283951073411797
+mae_better <- mean(abs(test_data$log_price - test_data$predicted_better))
+print(paste("The MAE of the better model is", mae_better))
+```
+
+Another model:
+```{r, cache=TRUE}
+# Fit the semi-full model on the training data
+semi_full_model <- gam(log_price ~ s(log_sqft_living) + te(lat, long), data = train_data)
+
+# Generate predictions for the test data
+test_data$predicted_semi_full <- predict(semi_full_model, newdata = test_data)
+
+# Compute the RMSE on the test data: 0.2335019713693
+rmse_semi_full <- sqrt(mean((test_data$log_price - test_data$predicted_semi_full)^2))
+print(paste("The RMSE of the semi-full model is", rmse_semi_full))
+
+# Compute the MAE of the semi-full model: 0.172087331129296
+mae_semi_full <- mean(abs(test_data$log_price - test_data$predicted_semi_full))
+print(paste("The MAE of the semi-full model is", mae_semi_full))
+```
+
+```{r, cache=TRUE}
+# unique values of d$floors:
+unique(d$floors)
+```
+
+
+
+
+Let's try a model with all the variables:
+```{r, cache=TRUE}
+# Fit the complete model on the training data
+complete_model <- gam(log_price ~ s(log_sqft_living) + bedrooms + floors + factor(waterfront) + log_view + condition + s(log_sqft_basement) +  s(log_sqft_lot) +  s(yr_built) + s(yr_renovated) + s(distance_from_center) + factor(renovation_category) + te(zipcode, lat, long), data = train_data)
+
+# Generate predictions for the test data
+test_data$predicted_complete <- predict(complete_model, newdata = test_data)
+
+# Compute the RMSE on the test data:  0.177842237260852
+rmse_complete <- sqrt(mean((test_data$log_price - test_data$predicted_complete)^2))
+
+# Compute the MAE of the complete model: 0.129656649977359"
+mae_complete <- mean(abs(test_data$log_price - test_data$predicted_complete))
+
+print(paste("The RMSE of the complete model is", rmse_complete))
+print(paste("The MAE of the complete model is", mae_complete))
+```
+
+This is the best performing one, but at what cost?? the edf are too high and some splines are not even significant. 
+
+```{r, cache=TRUE}
+# a simpler model:
+simpler_model <- gam(log_price ~ s(log_sqft_living) + bedrooms + floors + factor(waterfront) + log_view + condition + s(log_sqft_basement) +  s(log_sqft_lot) +  s(yr_built) + s(distance_from_center), data = train_data)
+
+# Generate predictions for the test data
+test_data$predicted_simpler <- predict(simpler_model, newdata = test_data)
+
+# Compute the RMSE on the test data:
+rmse_simpler <- sqrt(mean((test_data$log_price - test_data$predicted_simpler)^2))
+
+# Compute the MAE of the simpler model:
+mae_simpler <- mean(abs(test_data$log_price - test_data$predicted_simpler))
+
+print(paste("The RMSE of the simpler model is", rmse_simpler))
+print(paste("The MAE of the simpler model is", mae_simpler))
+
+```
+
+
+
+
+```{r, eval=FALSE}
+# plotting the fitted model over the data
+ggplot(d, aes(x=log_sqft_living, y=log_price)) +
+  geom_point() +
+  theme_minimal()
+```
+
+```{r, cache=TRUE}
+simple_model <- gam(log_price ~ s(log_sqft_living), data = d)
+
+semi_full_model <- gam(log_price ~ s(log_sqft_living) + te(lat, long), data = d)
+
+
+
++ s(grade) + s(bathrooms) + s(log_view) + s(bedrooms) + s(floors)
+
+better_model <- gam(log_price ~ s(log_sqft_living) + factor(waterfront) + grade , data = d)
+
+# Generate predictions for plotting
+d$predicted <- predict(full_model, newdata = d)
+
+# Create the plot
+ggplot(d, aes(x = log_sqft_living, y = log_price)) +
+  geom_point(alpha = 0.5) +  # Scatter plot of actual data
+  geom_line(aes(y = predicted), color = "blue", size = 1) +  # GAM predictions
+  theme_minimal() +
+  labs(
+    title = "GAM Fit: log_price vs. log_sqft_living",
+    x = "Log of Square Feet Living",
+    y = "Log of Price"
+  )
+
+```
+
+
+
+
+```{r, cache=TRUE}
+ggplot(d, aes(x=log_sqft_living, y=log_price)) +
+  geom_point() +
+  geom_smooth(method = "gam", formula = y ~ s(x) +  te(zipcode, lat, long), se = TRUE) +
+  theme_minimal()
+
+#geom_smooth(method = "gam", formula = y ~ s(log_sqft_living), se = TRUE)
+#full_model <- gam(log_price ~ s(log_sqft_living) + te(zipcode, lat, long), data = d)
+#summary(full_model)
+```
+
+We have 2 ways to find the best fitting model:
+- brutal grid search (not recommended for a large number of variables);
+- stepwise selection (forward, backward or both).
+
+First, let's undersample the dataset for a quicker computation of the grid search:
+```{r, cache=TRUE}
+# Undersample the dataset
+set.seed(42)
+d_us <- d[sample(nrow(d), 500),]
+str(d_us)
+```
+Now that we have undersampled the dataset, we can start the grid search on d_us to find the best model.
+Some points to consider:
+
+- the response variable will remain log_price;
+- zipcode, lat and long will be considered together in a tensor: te(zipcode, lat, long);
+- the combinations of variables highly correlated (correlated_pairs_list) will be avoided. For example: if a model has "log_sqft_lot15", it can't have "log_sqft_lot" as well.
+
+```{r, cache=TRUE}
+# Helper function to check if a subset is valid (no correlated pairs)
+is_valid_subset <- function(subset, correlated_pairs_list) {
+  for (pair in correlated_pairs_list) {
+    if (all(pair %in% subset)) {
+      return(FALSE)
+    }
+  }
+  return(TRUE)
+}
+
+# Generate all possible subsets of variables
+all_subsets <- lapply(1:length(variables), function(k) combn(variables, k, simplify = FALSE)) %>%
+  unlist(recursive = FALSE)
+
+# Filter valid subsets
+valid_subsets <- Filter(function(subset) is_valid_subset(subset, correlated_pairs_list), all_subsets)
+
+
+# Identify categorical and numerical variables
+categorical_vars <- c("waterfront") # Replace with your actual categorical variables
+numerical_vars <- setdiff(variables, categorical_vars)
+
+# Prepare to store results
+results <- data.frame(
+  formula = character(),
+  adj_r_squared = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# create a list where the formulas will be stored:
+formulas <- list()
+
+# Fit models and compute R-squared
+for (subset in valid_subsets) {
+  # Build the formula with splines for numerical variables and factors for categorical variables
+  terms <- lapply(subset, function(var) {
+    if (var %in% numerical_vars) {
+      return(sprintf("s(%s)", var))  # Fit splines for numerical variables
+    } else {
+      return(sprintf("factor(%s)", var))  # Use as factor for categorical variables
+    }
+  })
+  
+  formula <- as.formula(paste("log_price ~ te(zipcode, lat, long) +", paste(terms, collapse = " + ")))
+  
+  # Store the formula in formulas list:
+  formulas[[length(formulas)+1]] <- formula
+  
+  #printing the formuala of the model:
+  #print(formula)
+  
+  # Fit the GAM
+  #model <- gam(formula, data = d_us, method = "REML")
+  
+  # Get Adjusted R-squared
+  #adj_r_squared <- summary(model)$r.sq.ad
+  
+  # Store the results
+  #results <- rbind(results, data.frame(formula = deparse(formula), adj_r_squared = adj_r_squared))
+}
+
+# Find the best model
+#best_model <- results[which.max(results$adj_r_squared), ]
+
+
+
+
+# Output the best model
+cat("Best model:\n")
+#cat("Formula: ", best_model$formula, "\n")
+#cat("Adjusted R-squared: ", best_model$adj_r_squared, "\n")
+
+
+
+
+```
+```{r, cache=TRUE}
+# number of elements in formulas:
+length(formulas)
+```
+Let's try another approach: the stepwise selection.
+```{r, cache=TRUE}
+# Function to perform forward stepwise selection for GAM model
+forward_stepwise_gam <- function(data, initial_formula, scope) {
+  # Start with the initial model (just the intercept term or simple model)
+  current_formula <- as.formula(initial_formula)
+  current_model <- gam(current_formula, data = data, method = "REML")
+  
+  # Check if variables in scope have more than one level
+  valid_scope <- scope[sapply(scope, function(var) {
+    length(unique(data[[var]])) > 1  # Check for more than 1 unique level
+  })]
+  
+  # Iterate over the valid scope (set of variables to consider for addition)
+  while(length(valid_scope) > 0) {
+    # Try adding each variable and calculate AIC for the model
+    aic_values <- sapply(valid_scope, function(var) {
+      new_formula <- update(current_formula, paste(". ~ . + s(", var, ")"))
+      
+      print(new_formula)
+      
+      model_candidate <- gam(new_formula, data = data, method = "REML")
+      return(AIC(model_candidate))
+    })
+    
+    # Identify the term that improves AIC the most
+    best_term <- names(aic_values)[which.min(aic_values)]
+    
+    # If adding the best term improves the model (lower AIC), update the model
+    if (min(aic_values) < AIC(current_model)) {
+      current_formula <- update(current_formula, paste(". ~ . + s(", best_term, ")"))
+      current_model <- gam(current_formula, data = data, method = "REML")
+      valid_scope <- setdiff(valid_scope, best_term)  # Remove the selected variable from scope
+    } else {
+      break  # No further improvement, stop
+    }
+  }
+  
+  # Return the final model
+  return(current_model)
+}
+
+# Example usage:
+# Define the initial formula with only the intercept and the initial variable
+initial_formula <- "log_price ~ te(zipcode, lat, long) + s(log_sqft_living) + factor(waterfront)"
+
+# Define scope for forward stepwise selection (e.g., all other variables to consider adding)
+scope <- c(variables)  # Replace with your actual variables to consider
+
+# Fit the forward stepwise model
+best_model <- forward_stepwise_gam(data = d, initial_formula = initial_formula, scope = scope)
+
+# Display the summary of the best model
+summary(best_model)
+
+```
+
+```{r, cache=TRUE}
+colnames(d)
+```
+
+```{r, cache=TRUE}
+full_model <- gam(log_price ~ s(log_sqft_living) + te(zipcode, lat, long), data = d)
+summary(full_model)
+```
+
+
+```{r, cache=TRUE}
+# plot models vs. adjusted R-squared:
+ggplot(results, aes(x = reorder(formula, adj_r_squared), y = adj_r_squared)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Adjusted R-squared for Different Models",
+       x = "Model",
+       y = "Adjusted R-squared")
+```
+
+
+```{r, cache=TRUE}
+better_model <- gam(log_price ~ s(grade) + s(log_sqft_living) + factor(bathrooms) + te(zipcode_num, lat, long) + factor(view) + factor(bedrooms) + factor(floors), data = d)
+summary(better_model)
+```
+
+
+Then grid search to find the best model:
+```{r, cache=TRUE}
+correlated_pairs_list
+```
+
+
+Hence a better model could be:
+```{r, cache=TRUE}
+better_model <- gam(log(price) ~ s(grade) + s(log_sqft_living) + factor(bathrooms) + s(lat) + factor(view) + factor(bedrooms) + factor(floors), data = d)
+summary(better_model)
+```
+Nonetheless, this model could be complex to interpret, so we could consider a simpler model:
+```{r, cache=TRUE}
+simpler_model <- gam(log(price) ~ s(grade) + s(log_sqft_living) + factor(bathrooms) + s(lat), data = d)
+summary(simpler_model)
+```
+With this simpler model we still obtain an adj. R^2 higher than 0.8, which is quite good. Furthermore, it's worth noting that if we avoid considering lat, the performances drop considerably with an adj. R^2 lower than 0.6.
+
+meglio aggiungere un tensore per LAT e LONG (come Tanja) e plottare i risultati. Es: una mappa di dove il prezzo è più alto (stimato e reale). Mappa di seattle.
+
+Now, we can check the model residuals:
+```{r, cache=TRUE}
+par(mfrow=c(2,2))
+gam.check(simpler_model)
+```
+Everithing seems good, but the gaussian assumption about the residual doesn't seem to hold towards the tails.
+So, ...
+
+
+
+
+
+## Devise a model to assess whether there is any <- da fare seasonality in the price.
+First, let's which period we consider in the dataset:
+```{r, cache=TRUE}
+min(d$date)
+max(d$date)
+```
+Since It's only 1 year, we won't have enough data to assess seasonality and trends over years. However, we could consider the month/week of the sale as a proxy for seasonality.
+
+Let's plot the average price over the months:
+```{r, cache=TRUE}
+# average price per month:
+d$avg_p_m <- ave(d$price, format(d$date, "%m"), FUN = mean)
+# scatter plot of price over the months
+ggplot(d, aes(x = as.numeric(format(date, "%m")), y = avg_p_m)) +
+  geom_point() +
+  labs(title = "Average Price per Month vs. Month of the year",
+       x = "Month",
+       y = "Average Price per Month")
+```
+
+And over the weeks:
+```{r, cache=TRUE}
+# Calculate the average price per week of the year
+d$week_of_year <- format(d$date, "%U")  # Week number of the year
+d$avg_p_w <- ave(d$price, d$week_of_year, FUN = mean)
+
+# Scatter plot of average price over the 52 weeks of the year
+ggplot(d, aes(x = as.numeric(week_of_year), y = avg_p_w)) +
+  geom_point() +
+  labs(title = "Average Price per Week of the Year",
+       x = "Week #",
+       y = "Average Price") +
+  xaxis_text(on = TRUE, size = rel(0.6)) +
+  scale_x_continuous(breaks = seq(1, 52, by = 1))  # Ensure all weeks are shown
+```
+
+Let's now fit two models to assess seasonality:
+- average price over month of the year
+```{r, cache=TRUE}
+month <- as.numeric(format(d$date, "%m"))
+month_model <- gam(avg_p_m ~ s(month), data = d)
+summary(month_model)
+# plotting the fitted model over the data
+ggplot(d, aes(x=month, y=avg_p_m)) +
+  geom_point() +
+  geom_smooth(method = "gam", formula = y ~ s(x), se = TRUE) +
+  theme_minimal()
+```
+- average price over week of the year
+```{r, cache=TRUE}
+week <- as.numeric(d$week_of_year)
+week_model <- gam(avg_p_w ~ s(week), data = d)
+summary(week_model)
+# plotting the fitted model over the data
+ggplot(d, aes(x=week, y=avg_p_w)) +
+  geom_point() +
+  geom_smooth(method = "gam", formula = y ~ s(x), se = TRUE) +
+  theme_minimal()
+```
+From the summary of the models we can see that the splines fit better the month model than the week model. This is due to the fact that the week model is more noisy and the spline doesn't capture the trend as well as the month model.
+
+.... da capire cosa scrivere di interpretazione
+
+meglio evitare sta cosa delle settimane. Piuttosto faccio sulle giornate del mese/settimana
+
+test formale di staglionalità?? 
+
+da vedere come scegliere le variabili (no correlazione)
+
+criterio: prova tutti i modelli e poi selezione (cross validation generalizzata)
+
+# Excercise 4: Mixed membership models
+**Consider a subset of the data of end-of-year addresses of the presidents of the Italian Republic (in the
+course Team files) from 1992 (beginning of Scalfaro office) to 2021 (end of Mattarella first office). Select
+nouns, adjectives and verbs with a frequency of at least 5 occurrences as textual units of analysis. Fit a
+topic model by opportunely choosing the model structure – whether and how incorporating metadata
+(President and speech year) for detecting any significant influence on topic structure, and number of
+topics. Comment on the results and provide an effective visualization to help understanding.** <- magari potrei optare per un CTM (topics correlati). sempre da STM package.
+
+
+## Data loading, cleaning and preprocessing
+### Data loading
+Loading the data and displaying an overview: from 1992 (beginning of Scalfaro office) to 2021 (end of Mattarella first office)
+```{r, cache=TRUE}
+pathtofile <- "datasets/Corpus EndofYear/Corpus EoY lemm/"
+
+pres_dat <- readtext(paste0(pathtofile, "*.txt"), encoding = "UTF-8")
+
+# Filter to include only the last 30 speeches: from SCALFARO_1992 to MATTARELLA_2021
+pres_dat <- pres_dat %>% tail(30)
+
+# Extracting metadata: year and president
+pres_dat <- pres_dat %>%
+  mutate(
+    year = as.integer(str_extract(doc_id, "\\d{4}")),  # Extracts four consecutive digits as the year
+    pres = str_extract(doc_id, "[A-Z]+")  # Extracts consecutive uppercase letters as the president's name
+    )
+
+# Display an overview
+print(pres_dat, n = 30)
+```
+Before filtering words:
+
+- Statistics:
+```{r, cache=TRUE}
+# Tokenization and word count with filtering
+tidy_pres <- pres_dat %>%
+  unnest_tokens(word, text) %>%
+  count(word, sort = TRUE)
+
+# Calculate and print statistics for filtered data
+num_word_tokens <- sum(tidy_pres$n)
+num_word_types <- n_distinct(tidy_pres$word)
+
+cat("Before filtering:\nNo. word-tokens:", num_word_tokens, "\n")
+cat("No. word-types:", num_word_types, "\n")
+
+```
+- Example of text:
+```{r, cache=TRUE}
+cat("Example of text before preprocessing POS tags:\n")
+cat(head(unlist(strsplit(pres_dat$text[1], "\\s+")), 20), sep = " ")
+```
+
+There is some preprocessing that needs to be done before fitting the topic model. We will keep nouns (_N and _NM), adjectives (_A) and verbs (_V) with a frequency of at least 5 occurrences as textual units of analysis.
+
+### Data cleaning
+Fisrt, let's remove extra characters and POS tags, and keep only nouns, adjectives, and verbs:
+```{r, cache=TRUE}
+# filtering on POS tags:
+pres_dat$text <- pres_dat$text %>%
+    gsub("\n", " ", .) %>%
+    noquote %>%
+    str_replace_all(., "[,;.:()?!°'%«»-]", " ") %>% # Remove punctuation
+    # filtering out POS tags:
+    # with a blank space before the POS tag
+    gsub(" \\w+_CONG", "", .) %>%
+    gsub(" \\w+_DET", "", .) %>%
+    gsub(" \\w+_PREP", "", .) %>%
+    gsub(" \\w+_AVV", "", .) %>%
+    gsub(" \\w+_NUM", "", .) %>%
+    gsub(" \\w+_PRON", "", .) %>%
+    gsub(" \\w+_ESC", "", .) %>%
+    gsub(" \\w+_O ", " ", .) %>%
+    # without a blank space before the POS tag
+    gsub("\\w+_CONG", "", .) %>%
+    gsub("\\w+_DET", "", .) %>%
+    gsub("\\w+_PREP", "", .) %>%
+    gsub(" \\w+_AVV", "", .) %>%
+    gsub(" \\w+_NUM", "", .) %>%
+    gsub("\\w+_PRON", "", .) %>%
+    gsub(" \\w+_ESC", "", .) %>%
+    gsub("\\w+_O ", " ", .)
+
+
+# removing POS tags:
+pres_dat$text <- pres_dat$text %>%
+    gsub("_NM", "", .) %>%
+    gsub("_N", "", .) %>%
+    gsub("_A", "", .) %>%
+    gsub("_V", "", .)
+
+cat("\nAfter POS filtering and having removed the POS tags:\n")
+cat(head(unlist(strsplit(pres_dat$text[1], "\\s+")), 20), sep = " ")
+```
+Now, we can remove the words with less than 5 occurrences:
+```{r, cache=TRUE}
+# Tokenization and word count with filtering
+tidy_pres <- pres_dat %>%
+  unnest_tokens(word, text) %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 4) # Keep only words with a frequency of at least 5
+
+# Print the filtered data
+print("Most freequent words:")
+head(tidy_pres)
+print("Less freequent words:")
+tail(tidy_pres)
+
+# Calculate and print statistics for filtered data
+num_word_tokens <- sum(tidy_pres$n)
+num_word_types <- n_distinct(tidy_pres$word)
+
+cat("\nAfter filtering:\nNo. word-tokens:", num_word_tokens, "\n")
+cat("No. word-types:", num_word_types, "\n")
+```
+Since the most frequent words are "essere" and "avere", we can avoid considering them in the analysis:
+```{r, cache=TRUE}
+# Remove specific words ("essere" and "avere") from the text data
+pres_dat$text <- pres_dat$text %>%
+  str_replace_all("\\bessere\\b|\\bavere\\b", "")
+
+# Tokenization and word count with filtering
+tidy_pres <- pres_dat %>%
+  unnest_tokens(word, text) %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 4)
+
+# Print the filtered data
+print("Most freequent words:")
+head(tidy_pres)
+
+# Calculate and print statistics for filtered data
+num_word_tokens <- sum(tidy_pres$n)
+num_word_types <- n_distinct(tidy_pres$word)
+
+cat("\nAfter removing essere e avere:\nNo. word-tokens:", num_word_tokens, "\n")
+cat("No. word-types:", num_word_types, "\n")
+```
+We can also take a look at the most frequent words per president:
+```{r, cache=TRUE}
+# Combine all texts for each president
+pres_texts <- pres_dat %>%
+  group_by(pres) %>%
+  summarise(all_texts = paste(text, collapse = " ")) %>%
+  ungroup()
+
+# Tokenize and count word frequencies for each president
+top_words_pres <- pres_texts %>%
+  unnest_tokens(word, all_texts) %>%
+  count(pres, word, sort = TRUE) %>%
+  filter(n > 4) %>%
+  group_by(pres) %>%
+  slice_max(order_by = n, n = 10) %>%
+  arrange(pres, desc(n)) %>%
+  ungroup()
+
+# Identify unique and common words
+word_summary <- top_words_pres %>%
+  group_by(word) %>%
+  summarise(pres_count = n_distinct(pres)) %>%
+  mutate(word_type = case_when(
+    pres_count == 1 ~ "Unique to President",
+    pres_count == length(unique(top_words_pres$pres)) ~ "Common to All Presidents",
+    TRUE ~ "Other"
+  ))
+
+# Join the word classification back to the data
+top_words_pres <- top_words_pres %>%
+  left_join(word_summary, by = "word")
+
+# Plot with unique and common word highlighting
+ggplot(top_words_pres, aes(x = reorder_within(word, n, pres), y = n, fill = word_type)) +
+  geom_col(show.legend = TRUE) +
+  facet_wrap(~ pres, scales = "free_y") +
+  coord_flip() +
+  scale_x_reordered() +
+  scale_fill_manual(values = c("Unique to President" = "skyblue", 
+                               "Common to All Presidents" = "orange", 
+                               "Other" = "gray")) +
+  labs(
+    title = "Top 10 Most Common Words for Each President",
+    x = "Words",
+    y = "Frequency",
+    fill = "Word Type"
+  ) +
+  theme_minimal()
+
+```
+It seems like there are a lot of commonly used words among the presidents speeches, so this will probably be reflected in our analysis.
+
+### Data preprocessing
+Now we can process the text data using the `textProcessor` function from the `quanteda` package:
+```{r, cache=TRUE}
+processed <- textProcessor(documents = pres_dat$text,
+                           metadata = pres_dat,
+                           language = "it",
+                           lowercase = F,
+                           custompunctuation = c(".", "?", "!", ";", ",", ":", "'", "(", ")", "\""),
+                           removepunctuation = F,
+                           removestopwords = F,
+                           stem = F,
+                           wordLengths = c(2, Inf))
+```
+
+da capire cosa vuol dire questo grafico:
+```{r, cache=TRUE}
+# check word-docs removed
+plotRemoved(processed$documents, lower.thresh = seq(1, 50, by = 10))
+```
+
+
+This preprocessing step ensures that the text data is in the correct format for accurate topic modeling. The next step is converting the tokenized text into a matrix format that represents the frequency of terms in each document.
+
+```{r, cache=TRUE}
+out <- prepDocuments(processed$documents, processed$vocab, processed$meta)
+docs <- out$documents
+vocab <- out$vocab
+meta <- out$meta
+#convert metadata
+meta$pres <- as.factor(meta$pres)
+#meta$year <- as.numeric(meta$year) <- da togliere
+```
+
+
+```{r, cache=TRUE}
+#### Versione di Tanja che non serve
+# # Get number of documents and vocabulary size
+# num_docs <- length(docs)
+# vocab_size <- length(vocab)
+# 
+# # Initialize a sparse matrix with dimensions matching the number of documents and vocabulary size
+# dtm <- sparseMatrix(i = integer(0), j = integer(0), x = integer(0), dims = c(num_docs, vocab_size))
+# 
+# # Populate the DTM with the word frequencies
+# for (i in seq_along(docs)) {
+#   doc <- docs[[i]]
+#   for (j in 1:ncol(doc)) {
+#     word_index <- doc[1, j]
+#     word_freq <- doc[2, j]
+#     dtm[i, word_index] <- word_freq
+#   }
+# }
+# 
+# # Set column names to the vocabulary terms
+# colnames(dtm) <- vocab
+# 
+# # Convert the sparse matrix to a DocumentTermMatrix object from the 'tm' package
+# dtm <- as.DocumentTermMatrix(dtm, weighting = weightTf)
+```
+
+Preparation of the data for FindTopicsNumber:
+```{r, cache=TRUE}
+#library(quanteda)
+
+dati_corpus <- corpus(pres_dat, docid_field="doc_id", text_field="text")
+
+# Note: `remove_punct = T` when `quanteda::tokens` is used on the whole docs (otherwise, punctuations `"\""` `"…"` remain in the vocabulary) 
+
+tok <- tokens(dati_corpus,
+              remove_punct = T,
+              remove_symbols = T,
+              remove_numbers = FALSE,
+              remove_url = FALSE,
+              remove_separators = T,
+              split_hyphens = FALSE,
+              # split_tags = FALSE,
+              include_docvars = TRUE,
+              padding = FALSE)
+#tok %>% str
+
+dati_dfm <- dfm(tok,
+                tolower=F
+                )
+# dati_dfm %>% str
+dati_dfm %>% head
+dati_dfm %>% dim
+dati_dfm %>% sum
+
+dati_dfm2stm <- convert(dati_dfm, to = "stm")
+dati_dfm2stm %>% names()
+dati_dfm2stm$vocab %>% length
+
+
+dati_dfm2stm$meta$pres <- as.factor(dati_dfm2stm$meta$pres)
+
+# dati_dfm2stm$vocab[1:2]
+# cbind(dati_dfm2stm$vocab, tidy_pres %>% pull(word) %>% unique %>% sort)
+```
+
+
+## Model fitting
+Now that the data is ready, we can proceed with the models.
+### Ideal number of topics
+- with k_search
+spiegare a cosa serve il k_search è...
+
+faccio 4 run: 2 senza metadata e 2 con metadata
+
+```{r, cache=TRUE}
+k_search <- 2:50  # Tests from 2 to 50 topics
+
+#without metadata:
+#k1
+start_time <- Sys.time() # Start timing
+kResult_1 <- searchK(out$documents,
+                     out$vocab,
+                     K = k_search,
+                     verbose = F,
+                     heldout.seed = 2138)
+end_time <- Sys.time()
+k_1_time = end_time - start_time
+cat("The 1st k search took:", k_1_time, "seconds\n")
+save(kResult_1, file = "k_r1.Rdata")
+
+#k2
+start_time <- Sys.time() # Start timing
+kResult_2 <- searchK(out$documents,
+                     out$vocab,
+                     K = k_search,
+                     verbose = F,
+                     heldout.seed = 83120)
+end_time <- Sys.time()
+k_2_time = end_time - start_time
+cat("The 2nd k search took:", k_2_time, "seconds\n")
+save(kResult_2, file = "k_r2.Rdata")
+
+
+# with metadata:
+#k3
+start_time <- Sys.time() # Start timing
+kResult_3 <- searchK(out$documents,
+                     out$vocab,
+                     K = k_search,
+                     prevalence = ~ year, # non mi fa fare s(year)
+                     content = ~ pres,
+                     verbose = F,
+                     heldout.seed = 2138,
+                     data = meta)
+end_time <- Sys.time()
+k_3_time = end_time - start_time
+cat("The 3rd k search took:", k_3_time, "seconds\n")
+save(kResult_3, file = "k_r3.Rdata")
+
+
+
+#k4
+start_time <- Sys.time() # Start timing
+kResult_4 <- searchK(out$documents,
+                     out$vocab,
+                     K = k_search,
+                     prevalence = ~ year, # non mi fa fare s(year)
+                     content = ~ pres,
+                     verbose = F,
+                     heldout.seed = 83120,
+                     data = meta)
+end_time <- Sys.time()
+k_4_time = end_time - start_time
+cat("The 4th k search took:", k_4_time, "seconds\n")
+save(kResult_4, file = "k_r4.Rdata")
+```
+
+Plotting the k_searches:
+
+- without metadata:
+
+```{r, cache=TRUE}
+plot(kResult_1, main = "SearchK Result 1")
+plot(kResult_2, main = "SearchK Result 2")
+```
+
+- with metadata:
+
+```{r, cache=TRUE}
+plot(kResult_3, main = "SearchK Result 1")
+plot(kResult_4, main = "SearchK Result 2")
+```
+da questi plot direi tra i 7 e i 10 topics
+
+
+- with FindTopicsNumber:
+```{r, cache=TRUE}
+result <- FindTopicsNumber(
+    dati_dfm,
+    topics = seq(from = 2, to = 50, by = 1),
+    metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+    method = "Gibbs",
+    control = list(seed = 02138),
+    mc.cores = 3L,  # Adjust based on your system capability
+    verbose = TRUE
+)
+save(result, file = "k_ldatuning.Rdata")
+```
+```{r, cache=TRUE}
+FindTopicsNumber_plot(result)
+```
+
+It looks like 8 might be a good number of topics to consider. (without covariates)
+
+
+### Without covariates
+#### Model estimation
+In the case of no covariates, the model reduces to a (fast) implementation
+of the Correlated Topic Model (CTM)
+
+
+Fitting the model with 8 topics:
+```{r, cache=TRUE}
+Fit0 <- stm(out$documents, 
+            out$vocab, 
+            K = 8, 
+            data = out$meta, 
+            init.type = "Spectral", 
+            max.em.its = 500,
+            seed = 2138, 
+            verbose = F)
+
+save(Fit0, file = "stm_0.RData")
+```
+#### Model selection
+```{r, cache=TRUE}
+Fit0_select <- selectModel(out$documents, out$vocab, K = 8, data = out$meta, max.em.its = 500, verbose = TRUE,
+    init.type = "LDA", runs = 20, seed = 2138)
+
+save(Fit0_select, file = "stm_0_select.RData")
+```
+```{r, cache=TRUE}
+plotModels(Fit0_select, pch = c(1, 2, 3, 4), legend.position = "bottomright")
+```
+```{r, cache=TRUE}
+# calculating the average Exclusivity and Semantic coherence for each model:
+for (i in 1:4) {
+  cat("\nModel", i, ":\n")
+  exclusivity <- sapply(Fit0_select$exclusivity[i], mean)
+  cat("Exclusivity:", exclusivity, "\n")
+  sem_coherence <- sapply(Fit0_select$semcoh[i], mean)
+  cat("Semantic Coherence:", sem_coherence, "\n")
+}
+```
+From these performances, we may opt for model 1 or 2:
+
+```{r, cache=TRUE}
+Fit0_selectedmodel <- Fit0_select$runout[[1]]
+```
+
+Let's compare it with the one fitted by the spectral inizialization:
+```{r, cache=TRUE}
+Fit0_semcoh <- semanticCoherence(Fit0, out$documents, M = 10)
+Fit0_excl <- exclusivity(Fit0, M = 10, frexw = 0.7)
+Fit0_sel_semcoh <- semanticCoherence(Fit0_selectedmodel, out$documents)
+Fit0_sel_excl <- exclusivity(Fit0_selectedmodel)
+
+plot(c(Fit0_semcoh, Fit0_sel_semcoh), c(Fit0_excl, Fit0_sel_excl), xlab = "Semantic Coherence",
+    ylab = "Exclusivity", type = "n")
+points(Fit0_semcoh, Fit0_excl, col = 4, pch = 2)
+points(Fit0_sel_semcoh, Fit0_sel_excl, col = 2, pch = 15)
+points(mean(Fit0_semcoh), mean(Fit0_excl), col = 4, pch = "D")
+points(mean(Fit0_sel_semcoh), mean(Fit0_sel_excl), col = 2, pch = "R")
+# Add legend
+legend("bottomleft", 
+       legend = c("Spectral Initialization", "Selected Model"), 
+       col = c(4, 2), 
+       pch = c(2, 15),
+       title = "Model Types")
+
+
+```
+comparing the performances:
+```{r, cache=TRUE}
+cat("Spectral Initialization Model:\n")
+cat("Exclusivity:", mean(Fit0_excl), "\n")
+cat("Semantic Coherence:", mean(Fit0_semcoh), "\n")
+
+cat("\n\nSelected Model:\n")
+cat("Exclusivity:", mean(Fit0_sel_excl), "\n")
+cat("Semantic Coherence:", mean(Fit0_sel_semcoh), "\n")
+```
+As we can see, the Selected model is better.
+
+Now that we've choosen the best performing model, let's explore it:
+```{r, cache=TRUE}
+plot(Fit0_selectedmodel, type = "summary", xlim = c(0, 1), n = 15)
+```
+Spectral initialization one:
+```{r, cache=TRUE}
+plot(Fit0, type = "summary", xlim = c(0, 1), n = 7)
+```
+
+sembrano simili, ma non vogliono dire un cazzzzzzooooo
+
+maaaah, sembra un mappazzone di argomenti
+
+Top Words:
+```{r, cache=TRUE}
+labelTopics(Fit0_selectedmodel)
+```
+
+MAP Estimates
+```{r, cache=TRUE}
+plot(Fit0_selectedmodel, type = "hist")
+```
+
+```{r, cache=TRUE}
+
+# Calculate topic correlations for both models
+topic_corr_selected <- topicCorr(Fit0_selectedmodel)
+
+# Plot the topic correlations for the selected model
+plot(topic_corr_selected, 
+     main = "Topic Correlations for Selected Model", 
+     vertex.size = 6, 
+     edge.width = 2, 
+     edge.color = "blue")
+```
+
+
+### With covariates
+
+#### pres as a Prevalence Covariate
+how much of a document is associated with a topic (document-topic distribution)
+
+Fit the model with 8 topics:
+
+```{r, cache=TRUE}
+Fit_prevalence_1 <- stm(out$documents, 
+                      out$vocab, 
+                      K = 8, 
+                      prevalence = ~ year + pres, 
+                      data = out$meta, 
+                      init.type = "Spectral", 
+                      max.em.its = 500, 
+                      seed = 2138, 
+                      verbose = FALSE)
+
+Fit_prevalence_2 <- stm(out$documents,  # da vedere se ha senso e può essere utile (risultati drasticamente migliori???)
+                      out$vocab, 
+                      K = 8,
+                      gamma.prior='L1',
+                      prevalence = ~ year * pres, 
+                      data = out$meta, 
+                      init.type = "Spectral", 
+                      max.em.its = 500, 
+                      seed = 2138, 
+                      verbose = FALSE)
+```
+
+plot:
+```{r, cache=TRUE}
+plot(Fit_prevalence_2, type = "summary", xlim = c(0, 1), n = 10)
+```
+
+#### pres as a Content Covariate
+metadata that explain topical prevalence, referred to as topical
+prevalence covariates, allow the observed metadata to affect the
+frequency with which a topic is discussed
+• metadata that explain topical content, referred to as topical content
+covariates, allow the observed metadata to affect the word rate use
+within a given topic–that is, how a particular topic is discussed.
+
+
+
+how much of a document is associated with a topic (document-topic distribution)
+```{r, cache=TRUE}
+Fit_content <- stm(documents = out$documents, 
+                   vocab = out$vocab, 
+                   K = 8, 
+                   prevalence = ~ year, 
+                   content = ~ pres, 
+                   data = out$meta, 
+                   init.type = "Spectral", 
+                   max.em.its = 500, 
+                   seed = 2138, 
+                   verbose = FALSE)
+```
+
+
+```{r, cache=TRUE}
+# try with 40 topics:
+Fit_content_40 <- stm(documents = out$documents, 
+                   vocab = out$vocab, 
+                   K = 40, 
+                   prevalence = ~ year, 
+                   content = ~ pres, 
+                   data = out$meta, 
+                   init.type = "Spectral", 
+                   max.em.its = 500, 
+                   seed = 2138, 
+                   verbose = FALSE)
+```
+```{r, cache=TRUE}
+plot(Fit_content_40, type = "summary", xlim = c(0, 1), n = 10)
+```
+topic 3 interessante (parla di pandemia)
+
+
+```{r, cache=TRUE}
+th1 <- Fit_content_40[["theta"]]
+labelTopicsSel1 <- labelTopics(Fit_content_40, n = 15)
+top1 <- labelTopicsSel1[["topics"]]
+top1 <- t(top1)
+top1 <- top1[1:5, ]
+
+topicNames1 <- apply(top1, 2, paste, collapse = " ")
+
+# get mean topic proportions per pres
+topic_proportion_per_pres1 <- aggregate(th1, by = list(pres = meta$pres), mean)
+# set topic names to aggregated columns
+colnames(topic_proportion_per_pres1)[2:(40 + 1)] <- topicNames1
+# reshape data frame
+library(data.table)
+library(ggplot2)
+vizDataFrame1 <- melt(topic_proportion_per_pres1, id.vars = "pres")
+# plot tdata.tableproportions per pres as bar plot
+
+ggplot(vizDataFrame1, aes(x = pres, y = value, fill = variable)) + geom_bar(stat = "identity") +
+    ylab("proportion") + theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.text = element_text(size = 7))
+
+```
+devo cercare gli accadimenti storici, ma sembra che mattarella abbia la cosa del virus della pandemia....
+
+plot:
+```{r, cache=TRUE}
+plot(Fit_content, type = "summary", xlim = c(0, 1), n = 10)
+```
+questo modello sul content sembra l'unico sensato e che produce dei topic distinguibili
+
+
+Effect of year:
+```{r, cache=TRUE}
+effect1_year <- estimateEffect(c(1:8) ~ s(year), stmobj = Fit_content, metadata = meta)
+summary(effect1_year)
+```
+It looks like that year is relevant only for topic 4. Let's see the trend for topic 4 (relevant. Analisi sulla fede che è sceso l'hype????) and 2 (not relevant):
+
+
+provare la relevance degli anni per ogni topic (vedere quanto è significativo: rosso, giallo o grigio)
+```{r, cache=TRUE}
+yearseq <- seq(from = 1992, to = 2021)
+yearnames <- c(1992:2021)
+plot(effect1_year, "year", method = "continuous", topics = 4, model = Fit_content, printlegend = FALSE,
+    xaxt = "n", xlab = "Year", main = "Topic 4")
+axis(1, yearseq, labels = as.factor(yearnames))
+```
+man mano la gente sembra che se ne sbattaaa della fede
+
+```{r, cache=TRUE}
+yearseq <- seq(from = 1992, to = 2021)
+yearnames <- c(1992:2021)
+plot(effect1_year, "year", method = "continuous", topics = 2, model = Fit_content, printlegend = FALSE,
+    xaxt = "n", xlab = "Year", main = "Topic 2")
+axis(1, yearseq, labels = as.factor(yearnames))
+```
+devo capire come interpretarlooooo
+
+è l'evolvere dei topics by year....
+
+
+## Results interpretation
+
+quello che ho messo li sopra + ....
+
+```{r, cache=TRUE}
+plot(Fit_content, type = "perspectives", topics = 4)
+```
+
+```{r, cache=TRUE}
+# Imposta la griglia dei plot
+par(mfrow = c(2, 2))
+
+# Ciclo for per generare i plot
+for (i in 1:4) {
+  plot(Fit_content, type = "perspectives", topics = i, main = paste("Topic", i))
+}
+```
+
+```{r, cache=TRUE}
+# Imposta la griglia dei plot
+par(mfrow = c(2, 2))
+
+# Ciclo for per generare i plot
+for (i in 5:8) {
+  plot(Fit_content, type = "perspectives", topics = i, main = paste("Topic", i))
+}
+```
+
+perchè sembra che non mi plotti le parole giusteeee????
+
+
+```{r, cache=TRUE}
+th1 <- Fit_content[["theta"]]
+labelTopicsSel1 <- labelTopics(Fit_content, n = 15)
+top1 <- labelTopicsSel1[["topics"]]
+top1 <- t(top1)
+top1 <- top1[1:5, ]
+
+topicNames1 <- apply(top1, 2, paste, collapse = " ")
+
+# get mean topic proportions per pres
+topic_proportion_per_pres1 <- aggregate(th1, by = list(pres = meta$pres), mean)
+# set topic names to aggregated columns
+colnames(topic_proportion_per_pres1)[2:(8 + 1)] <- topicNames1
+# reshape data frame
+library(data.table)
+library(ggplot2)
+vizDataFrame1 <- melt(topic_proportion_per_pres1, id.vars = "pres")
+# plot tdata.tableproportions per pres as bar plot
+
+ggplot(vizDataFrame1, aes(x = pres, y = value, fill = variable)) + geom_bar(stat = "identity") +
+    ylab("proportion") + theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.text = element_text(size = 7))
+
+```
+
+
+The final analysis is for understanding which topics are most closely associated with each president and identifying the key terms that define those topics.
+
+```{r, echo=FALSE}
+# Get the topic proportions for each document
+theta_prevalence <- Fit_prevalence$theta
+
+# Calculate the mean topic proportions for each president
+topic_proportion_per_pres_prevalence <- aggregate(theta_prevalence, by = list(President = meta$pres), mean)
+
+# # Set topic names to aggregated columns
+# colnames(topic_proportion_per_pres_prevalence)[2:(num_topics + 1)] <- paste("Topic", 1:num_topics)
+
+# Identify the most prominent topic for each president
+most_prominent_topics <- apply(topic_proportion_per_pres_prevalence[, -1], 1, function(row) {
+  top_topic <- which.max(row)
+  top_topic
+})
+
+# Create a data frame for better visualization
+prominent_topics_df <- data.frame(
+  President = topic_proportion_per_pres_prevalence$President,
+  Most_Prominent_Topic = paste("Topic", most_prominent_topics)
+)
+
+
+# Extract the top words for each identified topic
+top_words_per_topic <- labelTopics(Fit_prevalence, n = 10)$prob
+
+# Create a data frame to store the top words for each president's prominent topic
+top_words_df <- data.frame(
+  President = prominent_topics_df$President,
+  Topic = prominent_topics_df$Most_Prominent_Topic,
+  Top_Words = sapply(most_prominent_topics, function(topic) {
+    paste(top_words_per_topic[topic, ], collapse = ", ")
+  })
+)
+
+# Output the top words for each president's most prominent topic
+print(top_words_df)
+
+
+
+# Step 1: Calculate Mean Topic Proportions for Each President
+theta_prevalence <- Fit_prevalence$theta
+topic_proportion_per_pres_prevalence <- aggregate(theta_prevalence, by = list(President = meta$pres), mean)
+# colnames(topic_proportion_per_pres_prevalence)[2:(num_topics + 1)] <- paste("Topic", 1:num_topics)
+
+# Step 2: Identify the Most Prominent Topic for Each President
+most_prominent_topics <- apply(topic_proportion_per_pres_prevalence[, -1], 1, function(row) {
+  top_topic <- which.max(row)
+  top_topic
+})
+
+prominent_topics_df <- data.frame(
+  President = topic_proportion_per_pres_prevalence$President,
+  Most_Prominent_Topic = paste("Topic", most_prominent_topics)
+)
+
+# Step 3: Output the Top 10 Words for Each Topic
+top_words_per_topic <- labelTopics(Fit_prevalence, n = 20)$prob
+
+top_words_df <- data.frame(
+  President = prominent_topics_df$President,
+  Topic = prominent_topics_df$Most_Prominent_Topic,
+  Top_Words = sapply(most_prominent_topics, function(topic) {
+    paste(top_words_per_topic[topic, ], collapse = ", ")
+  })
+)
+
+# Output the top words for each president's most prominent topic
+print(top_words_df)
+
+
+```
